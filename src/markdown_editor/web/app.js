@@ -21,6 +21,9 @@ const state = {
 
 let bridge = null;
 let editor = null;
+let wysiwyg = null;
+// WYSIWYGエディタが現在保持している内容（不要なsetMarkdownによる再正規化を避ける）
+let wysiwygDoc = null;
 // Python側から文書を差し替える際、編集通知が跳ね返らないようにするためのフラグ
 let applyingExternal = false;
 
@@ -76,6 +79,8 @@ prefersDark.addEventListener("change", () => {
 const previewPane = document.getElementById("preview-pane");
 const previewEl = document.getElementById("preview");
 const editorPane = document.getElementById("editor-pane");
+const wysiwygPane = document.getElementById("wysiwyg-pane");
+const wysiwygRoot = document.getElementById("wysiwyg-root");
 const filePathEl = document.getElementById("file-path");
 
 let renderSeq = 0;
@@ -110,6 +115,22 @@ function ensureEditor() {
   });
 }
 
+// ---- WYSIWYG モード ----
+
+async function ensureWysiwyg() {
+  if (wysiwyg) return;
+  wysiwygDoc = state.markdown;
+  wysiwyg = await window.WysiwygEditor.create(wysiwygRoot, {
+    doc: state.markdown,
+    dark: prefersDark.matches,
+    onChange: (docText) => {
+      wysiwygDoc = docText;
+      state.markdown = docText;
+      if (bridge) bridge.contentChanged(docText);
+    },
+  });
+}
+
 // ---- モード切替 ----
 
 function getScrollFraction(el) {
@@ -117,8 +138,8 @@ function getScrollFraction(el) {
   return max > 0 ? el.scrollTop / max : 0;
 }
 
-function switchMode(mode) {
-  if (mode === state.mode || mode === "wysiwyg") return;
+async function switchMode(mode) {
+  if (mode === state.mode) return;
   const prevMode = state.mode;
   state.mode = mode;
 
@@ -126,15 +147,24 @@ function switchMode(mode) {
     btn.classList.toggle("active", btn.dataset.mode === mode);
   });
 
+  // Python側へモード変更を通知する（検索機能のモード連動などに使用）
+  if (bridge) bridge.modeChanged(mode);
+
   // 離れるペインのスクロール位置（比率）を引き継ぐ
-  const fraction =
-    prevMode === "edit" && editor
-      ? editor.getScrollFraction()
-      : getScrollFraction(previewPane);
+  let fraction;
+  if (prevMode === "edit" && editor) {
+    fraction = editor.getScrollFraction();
+  } else if (prevMode === "wysiwyg") {
+    fraction = getScrollFraction(wysiwygPane);
+  } else {
+    fraction = getScrollFraction(previewPane);
+  }
+
+  previewPane.hidden = mode !== "preview";
+  editorPane.hidden = mode !== "edit";
+  wysiwygPane.hidden = mode !== "wysiwyg";
 
   if (mode === "edit") {
-    previewPane.hidden = true;
-    editorPane.hidden = false;
     ensureEditor();
     if (editor.getDoc() !== state.markdown) {
       applyingExternal = true;
@@ -143,9 +173,17 @@ function switchMode(mode) {
     }
     editor.setScrollFraction(fraction);
     editor.focus();
+  } else if (mode === "wysiwyg") {
+    await ensureWysiwyg();
+    // 他モードで編集された場合のみ反映する
+    // （未編集での再設定はMilkdownの再シリアライズによる書式正規化を招くため避ける）
+    if (wysiwygDoc !== state.markdown) {
+      wysiwygDoc = state.markdown;
+      wysiwyg.setMarkdown(state.markdown);
+    }
+    wysiwygPane.scrollTop =
+      fraction * (wysiwygPane.scrollHeight - wysiwygPane.clientHeight);
   } else {
-    editorPane.hidden = true;
-    previewPane.hidden = false;
     render().then(() => {
       previewPane.scrollTop =
         fraction * (previewPane.scrollHeight - previewPane.clientHeight);
@@ -169,11 +207,17 @@ function setDocument(path, content) {
     editor.setDoc(content);
     applyingExternal = false;
   }
+  if (wysiwyg) {
+    wysiwygDoc = content;
+    wysiwyg.setMarkdown(content);
+  }
   if (state.mode === "preview") {
     render();
     previewPane.scrollTop = 0;
-  } else if (editor) {
+  } else if (state.mode === "edit" && editor) {
     editor.setScrollFraction(0);
+  } else if (state.mode === "wysiwyg") {
+    wysiwygPane.scrollTop = 0;
   }
 }
 
@@ -188,13 +232,13 @@ const SAMPLE_MARKDOWN = `# Markdown Editor
 - [x] 見出し・リスト・**強調** ・ ~~取り消し線~~
 - [x] テーブル / タスクリスト
 - [x] Editモード（ソース編集）
-- [ ] WYSIWYGモード（未実装）
+- [x] WYSIWYGモード
 
 | モード | 状態 |
 |---|---|
 | Preview | ✅ 実装済み |
 | Edit | ✅ 実装済み |
-| WYSIWYG | 🚧 未実装 |
+| WYSIWYG | ✅ 実装済み |
 
 ## コードハイライト
 

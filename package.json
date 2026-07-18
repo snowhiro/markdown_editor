@@ -3,7 +3,7 @@
   "private": true,
   "description": "Frontend build for the Markdown editor (bundles ESM libraries into web/vendor/)",
   "scripts": {
-    "build": "esbuild frontend/editor.js --bundle --minify --format=iife --outfile=src/markdown_editor/web/vendor/editor-bundle.js",
+    "build": "esbuild frontend/editor.js frontend/wysiwyg.js --bundle --minify --format=iife --outdir=src/markdown_editor/web/vendor --entry-names=[name]-bundle",
     "watch": "npm run build -- --watch"
   },
   "devDependencies": {
@@ -13,7 +13,19 @@
     "@codemirror/state": "^6.4.0",
     "@codemirror/theme-one-dark": "^6.1.0",
     "@codemirror/view": "^6.34.0",
+    "@milkdown/core": "^7.21.3",
+    "@milkdown/ctx": "^7.21.3",
+    "@milkdown/plugin-clipboard": "^7.21.3",
+    "@milkdown/plugin-diagram": "^7.7.0",
+    "@milkdown/plugin-history": "^7.21.3",
+    "@milkdown/plugin-listener": "^7.21.3",
+    "@milkdown/preset-commonmark": "^7.21.3",
+    "@milkdown/preset-gfm": "^7.21.3",
+    "@milkdown/prose": "^7.21.3",
+    "@milkdown/transformer": "^7.21.3",
+    "@milkdown/utils": "^7.21.3",
     "codemirror": "^6.0.1",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "mermaid": "^10.9.6"
   }
 }

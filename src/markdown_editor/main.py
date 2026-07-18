@@ -12,11 +12,24 @@ Python側は常に最新の内容を保持しており、保存・終了確認�
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -30,13 +43,13 @@ WELCOME_MARKDOWN = """\
 - [x] 見出し・リスト・**強調** ・ ~~取り消し線~~
 - [x] テーブル / タスクリスト
 - [x] Editモード（ソース編集）
-- [ ] WYSIWYGモード（未実装）
+- [x] WYSIWYGモード
 
 | モード | 状態 |
 |---|---|
 | Preview | ✅ 実装済み |
 | Edit | ✅ 実装済み |
-| WYSIWYG | 🚧 未実装 |
+| WYSIWYG | ✅ 実装済み |
 
 ## コードハイライト
 
@@ -76,6 +89,10 @@ class Bridge(QObject):
         self.window.on_content_changed(content)
 
     @Slot(str)
+    def modeChanged(self, mode: str) -> None:
+        self.window.on_mode_changed(mode)
+
+    @Slot(str)
     def log(self, message: str) -> None:
         print(f"[web] {message}", file=sys.stderr)
 
@@ -90,9 +107,27 @@ class MainWindow(QMainWindow):
         self.saved_content = WELCOME_MARKDOWN
         self.newline = "\n"
         self.initial_path = initial_path
+        self.current_mode = "preview"
 
         self.view = QWebEngineView(self)
-        self.setCentralWidget(self.view)
+
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.search_bar = self._build_search_bar()
+        # 素のQWidgetは既定で垂直方向もPreferred（伸縮可）のため、
+        # QVBoxLayout内でQWebEngineViewと余剰スペースを取り合い、
+        # 検索バーが不要に引き伸ばされてしまう。縦方向を固定して防ぐ。
+        self.search_bar.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.search_bar.setVisible(False)
+        layout.addWidget(self.search_bar)
+        layout.addWidget(self.view, 1)
+        self.setCentralWidget(central)
+
+        self.view.page().findTextFinished.connect(self._on_find_finished)
 
         self.bridge = Bridge(self)
         self.channel = QWebChannel(self)
@@ -130,6 +165,116 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_as)
         file_menu.addAction(save_as_action)
+
+        edit_menu = self.menuBar().addMenu("編集")
+
+        self.search_action = QAction("検索...", self)
+        self.search_action.setShortcut(QKeySequence.StandardKey.Find)
+        self.search_action.triggered.connect(self.show_search)
+        edit_menu.addAction(self.search_action)
+
+    # ---- 検索（Previewモード） ----
+
+    def _build_search_bar(self) -> QWidget:
+        bar = QWidget(self)
+        bar.setAutoFillBackground(True)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+
+        self.search_input = QLineEdit(bar)
+        self.search_input.setPlaceholderText("検索")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self.find_next)
+        self.search_input.installEventFilter(self)
+        layout.addWidget(self.search_input, 1)
+
+        self.search_count = QLabel("", bar)
+        self.search_count.setMinimumWidth(48)
+        self.search_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.search_count)
+
+        prev_btn = QToolButton(bar)
+        prev_btn.setText("↑")
+        prev_btn.setToolTip("前のヒットへ (Shift+Enter)")
+        prev_btn.clicked.connect(self.find_prev)
+        layout.addWidget(prev_btn)
+
+        next_btn = QToolButton(bar)
+        next_btn.setText("↓")
+        next_btn.setToolTip("次のヒットへ (Enter)")
+        next_btn.clicked.connect(self.find_next)
+        layout.addWidget(next_btn)
+
+        close_btn = QToolButton(bar)
+        close_btn.setText("✕")
+        close_btn.setToolTip("検索を閉じる (Esc)")
+        close_btn.clicked.connect(self.close_search)
+        layout.addWidget(close_btn)
+
+        return bar
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self.search_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self.close_search()
+                return True
+            if (
+                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            ):
+                self.find_prev()
+                return True
+        return super().eventFilter(obj, event)
+
+    def show_search(self) -> None:
+        if self.current_mode != "preview":
+            return
+        self.search_bar.setVisible(True)
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+        if self.search_input.text():
+            self._find(self.search_input.text())
+
+    def close_search(self) -> None:
+        self.search_bar.setVisible(False)
+        self.view.page().findText("")
+        self.search_count.setText("")
+        self.view.setFocus()
+
+    def _find(self, text: str, backward: bool = False) -> None:
+        flags = (
+            QWebEnginePage.FindFlag.FindBackward
+            if backward
+            else QWebEnginePage.FindFlag(0)
+        )
+        self.view.page().findText(text, flags)
+        if not text:
+            self.search_count.setText("")
+
+    def _on_search_text_changed(self, text: str) -> None:
+        self._find(text)
+
+    def find_next(self) -> None:
+        self._find(self.search_input.text())
+
+    def find_prev(self) -> None:
+        self._find(self.search_input.text(), backward=True)
+
+    def _on_find_finished(self, result) -> None:
+        if not self.search_input.text():
+            self.search_count.setText("")
+            return
+        total = result.numberOfMatches()
+        active = result.activeMatch()
+        self.search_count.setText(f"{active}/{total}" if total else "0件")
+
+    def on_mode_changed(self, mode: str) -> None:
+        self.current_mode = mode
+        self.search_action.setEnabled(mode == "preview")
+        if mode != "preview" and self.search_bar.isVisible():
+            self.close_search()
 
     # ---- 状態管理 ----
 
@@ -176,6 +321,8 @@ class MainWindow(QMainWindow):
     def new_file(self) -> None:
         if not self._confirm_discard():
             return
+        if self.search_bar.isVisible():
+            self.close_search()
         self.current_path = None
         self.current_content = ""
         self.saved_content = ""
@@ -204,6 +351,8 @@ class MainWindow(QMainWindow):
         except (OSError, UnicodeDecodeError) as e:
             QMessageBox.critical(self, "エラー", f"ファイルを開けませんでした:\n{e}")
             return
+        if self.search_bar.isVisible():
+            self.close_search()
         # 改行コードを検出して記憶し、内部ではLFに正規化する
         self.newline = "\r\n" if "\r\n" in raw else "\n"
         content = raw.replace("\r\n", "\n")

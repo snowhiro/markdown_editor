@@ -2,7 +2,7 @@
 
 macOS / Windows で動作するクロスプラットフォームMarkdownエディタ。
 GitHub Flavored Markdown (GFM) と Mermaid記法をサポートし、
-Preview / WYSIWYG / Edit の3モードを切り替えて利用できる（Preview / Edit 実装済み、WYSIWYGは未実装）。
+Preview / WYSIWYG / Edit の3モードを切り替えて利用できる。
 
 要件の詳細は [docs/spec.md](docs/spec.md) を参照。
 
@@ -31,7 +31,8 @@ markdown-editor path/to/file.md   # ファイルを指定して起動
 ## 構成
 
 ```
-frontend/            # esbuildでバンドルするESMソース（CodeMirror 6等）
+frontend/            # esbuildでバンドルするESMソース
+                     # (editor.js: CodeMirror 6 / wysiwyg.js: Milkdown)
 src/markdown_editor/
 ├── main.py          # PySide6 アプリシェル（ウィンドウ・メニュー・ファイルI/O・保存管理）
 └── web/             # QWebEngineView 内で動作するUI本体
@@ -39,7 +40,8 @@ src/markdown_editor/
     ├── app.js       # Markdownレンダリング・モード管理・Pythonブリッジ
     ├── styles.css   # GitHub風スタイル（ライト/ダーク対応）
     └── vendor/      # バンドル済みJSライブラリ
-                     # (markdown-it, mermaid, highlight.js, editor-bundle)
+                     # (markdown-it, mermaid, highlight.js,
+                     #  editor-bundle, wysiwyg-bundle)
 ```
 
 ## ライセンス

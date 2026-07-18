@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Markdown Editor</title>
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="vendor/wysiwyg-bundle.css">
 <link rel="stylesheet" href="vendor/highlight-github.min.css" media="(prefers-color-scheme: light)">
 <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" media="(prefers-color-scheme: dark)">
 </head>
@@ -11,7 +12,7 @@
 <header id="toolbar">
   <nav id="mode-tabs" role="tablist">
     <button class="mode-tab active" data-mode="preview" role="tab">Preview</button>
-    <button class="mode-tab" data-mode="wysiwyg" role="tab" disabled title="未実装">WYSIWYG</button>
+    <button class="mode-tab" data-mode="wysiwyg" role="tab">WYSIWYG</button>
     <button class="mode-tab" data-mode="edit" role="tab">Edit</button>
   </nav>
   <span id="file-path"></span>
@@ -22,6 +23,9 @@
     <article id="preview" class="markdown-body"></article>
   </div>
   <div id="editor-pane" hidden></div>
+  <div id="wysiwyg-pane" hidden>
+    <div id="wysiwyg-root" class="markdown-body"></div>
+  </div>
 </main>
 
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -30,6 +34,7 @@
 <script src="vendor/highlight.min.js"></script>
 <script src="vendor/mermaid.min.js"></script>
 <script src="vendor/editor-bundle.js"></script>
+<script src="vendor/wysiwyg-bundle.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
