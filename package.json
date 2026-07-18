@@ -1,0 +1,19 @@
+{
+  "name": "markdown-editor-frontend",
+  "private": true,
+  "description": "Frontend build for the Markdown editor (bundles ESM libraries into web/vendor/)",
+  "scripts": {
+    "build": "esbuild frontend/editor.js --bundle --minify --format=iife --outfile=src/markdown_editor/web/vendor/editor-bundle.js",
+    "watch": "npm run build -- --watch"
+  },
+  "devDependencies": {
+    "@codemirror/commands": "^6.7.0",
+    "@codemirror/lang-markdown": "^6.3.0",
+    "@codemirror/language-data": "^6.5.0",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/theme-one-dark": "^6.1.0",
+    "@codemirror/view": "^6.34.0",
+    "codemirror": "^6.0.1",
+    "esbuild": "^0.24.0"
+  }
+}

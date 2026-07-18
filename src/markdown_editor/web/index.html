@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Markdown Editor</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="vendor/highlight-github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="vendor/highlight-github-dark.min.css" media="(prefers-color-scheme: dark)">
+</head>
+<body>
+<header id="toolbar">
+  <nav id="mode-tabs" role="tablist">
+    <button class="mode-tab active" data-mode="preview" role="tab">Preview</button>
+    <button class="mode-tab" data-mode="wysiwyg" role="tab" disabled title="未実装">WYSIWYG</button>
+    <button class="mode-tab" data-mode="edit" role="tab">Edit</button>
+  </nav>
+  <span id="file-path"></span>
+</header>
+
+<main id="content">
+  <div id="preview-pane">
+    <article id="preview" class="markdown-body"></article>
+  </div>
+  <div id="editor-pane" hidden></div>
+</main>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="vendor/markdown-it.min.js"></script>
+<script src="vendor/markdown-it-task-lists.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+<script src="vendor/mermaid.min.js"></script>
+<script src="vendor/editor-bundle.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
