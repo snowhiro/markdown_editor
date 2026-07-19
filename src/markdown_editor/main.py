@@ -9,10 +9,12 @@ Python側は常に最新の内容を保持しており、保存・終了確認�
 改行コードはファイルごとに検出して保持し、内部処理はLFに正規化する。
 """
 
+import html as html_module
 import sys
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage
@@ -93,6 +95,10 @@ class Bridge(QObject):
         self.window.on_mode_changed(mode)
 
     @Slot(str)
+    def exportBody(self, body: str) -> None:
+        self.window.on_export_body(body)
+
+    @Slot(str)
     def log(self, message: str) -> None:
         print(f"[web] {message}", file=sys.stderr)
 
@@ -108,6 +114,11 @@ class MainWindow(QMainWindow):
         self.newline = "\n"
         self.initial_path = initial_path
         self.current_mode = "preview"
+
+        # エクスポート処理の進行状態（(出力先Path, "html"|"pdf") / 作業用ビュー等）
+        self._export_target: tuple[Path, str] | None = None
+        self._export_view: QWebEngineView | None = None
+        self._export_tmp: Path | None = None
 
         self.view = QWebEngineView(self)
 
@@ -165,6 +176,16 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_as)
         file_menu.addAction(save_as_action)
+
+        file_menu.addSeparator()
+
+        export_html_action = QAction("HTMLとしてエクスポート...", self)
+        export_html_action.triggered.connect(self.export_html_dialog)
+        file_menu.addAction(export_html_action)
+
+        export_pdf_action = QAction("PDFとしてエクスポート...", self)
+        export_pdf_action.triggered.connect(self.export_pdf_dialog)
+        file_menu.addAction(export_pdf_action)
 
         edit_menu = self.menuBar().addMenu("編集")
 
@@ -396,6 +417,147 @@ class MainWindow(QMainWindow):
         self.saved_content = self.current_content
         self._update_title()
         return True
+
+    # ---- エクスポート（HTML/PDF: spec.md 7章） ----
+
+    _EXPORT_ERROR_PREFIX = "\x00ERROR\x00"
+
+    def _export_default_path(self, suffix: str) -> str:
+        if self.current_path:
+            return str(self.current_path.with_suffix(suffix))
+        return str(Path.home() / f"無題{suffix}")
+
+    def export_html_dialog(self) -> None:
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "HTMLとしてエクスポート",
+            self._export_default_path(".html"),
+            "HTML (*.html *.htm)",
+        )
+        if path_str:
+            self._start_export(Path(path_str), "html")
+
+    def export_pdf_dialog(self) -> None:
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "PDFとしてエクスポート",
+            self._export_default_path(".pdf"),
+            "PDF (*.pdf)",
+        )
+        if path_str:
+            self._start_export(Path(path_str), "pdf")
+
+    def _start_export(self, path: Path, kind: str) -> None:
+        """JS側にレンダリング済み本文HTMLを要求する。結果はon_export_bodyへ届く。"""
+        self._export_target = (path, kind)
+        self.view.page().runJavaScript(
+            "window.exportHtml()"
+            ".then(b => bridge.exportBody(b))"
+            ".catch(e => bridge.exportBody('\\u0000ERROR\\u0000' + (e && e.message || e)))"
+        )
+
+    def on_export_body(self, body: str) -> None:
+        if self._export_target is None:
+            return
+        path, kind = self._export_target
+        self._export_target = None
+        if body.startswith(self._EXPORT_ERROR_PREFIX):
+            QMessageBox.critical(
+                self,
+                "エクスポート失敗",
+                f"レンダリングに失敗しました:\n{body[len(self._EXPORT_ERROR_PREFIX):]}",
+            )
+            return
+        html = self._build_export_html(body)
+        if kind == "html":
+            try:
+                path.write_text(html, encoding="utf-8")
+            except OSError as e:
+                QMessageBox.critical(self, "エクスポート失敗", f"書き込みに失敗しました:\n{e}")
+                return
+            self.statusBar().showMessage(f"HTMLをエクスポートしました: {path}", 5000)
+        else:
+            self._print_pdf(html, path)
+
+    def _build_export_html(self, body: str) -> str:
+        """本文HTMLをCSS埋め込みの自己完結な単一HTMLに組み立てる。"""
+        styles = (WEB_DIR / "styles.css").read_text(encoding="utf-8")
+        hl_light = (WEB_DIR / "vendor" / "highlight-github.min.css").read_text(
+            encoding="utf-8"
+        )
+        hl_dark = (WEB_DIR / "vendor" / "highlight-github-dark.min.css").read_text(
+            encoding="utf-8"
+        )
+        title = html_module.escape(
+            self.current_path.stem if self.current_path else "無題"
+        )
+        return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>{styles}</style>
+<style media="(prefers-color-scheme: light)">{hl_light}</style>
+<style media="(prefers-color-scheme: dark)">{hl_dark}</style>
+<style>
+/* エクスポート用: アプリのペインレイアウトに依存しない単体表示 */
+body {{ margin: 0; }}
+.markdown-body {{ max-width: 860px; margin: 0 auto; padding: 32px 24px; }}
+</style>
+</head>
+<body>
+<article class="markdown-body">
+{body}
+</article>
+</body>
+</html>
+"""
+
+    def _print_pdf(self, html: str, path: Path) -> None:
+        """エクスポート用HTMLを非表示ページに読み込み、printToPdfでPDF化する。"""
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8"
+        )
+        tmp.write(html)
+        tmp.close()
+        self._export_tmp = Path(tmp.name)
+
+        # 表示中のビューに影響を与えないよう専用のビューを使う（参照保持が必要）
+        self._export_view = QWebEngineView()
+        page = self._export_view.page()
+        page.pdfPrintingFinished.connect(self._on_pdf_done)
+
+        def on_loaded(ok: bool) -> None:
+            if not ok:
+                self._cleanup_pdf_export()
+                QMessageBox.critical(
+                    self, "エクスポート失敗", "PDF用ページの読み込みに失敗しました"
+                )
+                return
+            # フォント読み込み等の描画安定を少し待ってから印刷する
+            QTimer.singleShot(300, lambda: page.printToPdf(str(path)))
+
+        page.loadFinished.connect(on_loaded)
+        self._export_view.load(QUrl.fromLocalFile(str(self._export_tmp)))
+
+    def _on_pdf_done(self, file_path: str, ok: bool) -> None:
+        self._cleanup_pdf_export()
+        if ok:
+            self.statusBar().showMessage(f"PDFをエクスポートしました: {file_path}", 5000)
+        else:
+            QMessageBox.critical(self, "エクスポート失敗", "PDFの書き出しに失敗しました")
+
+    def _cleanup_pdf_export(self) -> None:
+        if self._export_tmp is not None:
+            try:
+                self._export_tmp.unlink()
+            except OSError:
+                pass
+            self._export_tmp = None
+        if self._export_view is not None:
+            self._export_view.deleteLater()
+            self._export_view = None
 
     # ---- 終了処理 ----
 

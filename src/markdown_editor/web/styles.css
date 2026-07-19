@@ -173,6 +173,364 @@ body {
   color: #fff;
 }
 
+/* ---- Mermaidフローチャート GUI編集ダイアログ ---- */
+
+.de-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.de-dialog {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  width: 92%;
+  height: 88%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.de-dialog.de-message {
+  width: auto;
+  height: auto;
+  max-width: 480px;
+  padding: 24px;
+  gap: 16px;
+  align-items: center;
+}
+
+.de-dialog.de-message p {
+  margin: 0;
+  white-space: pre-line;
+  line-height: 1.7;
+}
+
+.de-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.de-toolbar button,
+.de-dialog.de-message button {
+  padding: 4px 12px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.de-toolbar button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.de-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.de-toolbar button.de-primary,
+.de-dialog.de-message button.de-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.de-toolbar select,
+.de-toolbar input[type="text"] {
+  padding: 3px 6px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.de-toolbar input[type="text"] {
+  width: 160px;
+}
+
+.de-zoom-label {
+  min-width: 52px;
+}
+
+.de-label-text {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.de-selection {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.de-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.de-spacer {
+  flex: 1;
+}
+
+.de-canvas {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+  padding: 24px;
+}
+
+.de-canvas g.node {
+  cursor: pointer;
+}
+
+.de-canvas path.flowchart-link {
+  cursor: pointer;
+}
+
+.de-canvas g.node.de-selected {
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+
+.de-canvas path.flowchart-link.de-selected {
+  stroke: var(--accent) !important;
+  stroke-width: 3px !important;
+}
+
+.de-context-menu {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.de-context-menu button {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.de-context-menu button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.de-canvas.de-connecting {
+  cursor: crosshair;
+}
+
+.de-drag-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.de-drag-line line {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
+.de-hint {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--toolbar-bg);
+  border-top: 1px solid var(--border);
+  flex: none;
+}
+
+/* ---- 編集ペインの右クリックメニュー（テーブル挿入） ---- */
+
+.app-context-menu {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  user-select: none;
+}
+
+.acm-item {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.acm-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.acm-sub-arrow {
+  margin-left: auto;
+  padding-left: 16px;
+  font-size: 11px;
+}
+
+.acm-submenu {
+  position: fixed;
+  z-index: 91;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.tg-grid {
+  display: grid;
+  gap: 3px;
+}
+
+.tg-cell {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.tg-cell.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  opacity: 0.6;
+}
+
+.tg-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-align: center;
+  padding-top: 6px;
+}
+
+/* ---- Mermaidシーケンス図 GUI編集ダイアログ ---- */
+
+.de-seq-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.de-seq-body .de-canvas {
+  flex: 1;
+}
+
+.de-seq-list {
+  width: 280px;
+  flex: none;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.de-seq-item {
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: grab;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.de-seq-item:hover {
+  border-color: var(--accent);
+}
+
+.de-seq-item.de-selected {
+  border-color: var(--accent);
+  background: var(--toolbar-bg);
+}
+
+.de-seq-item.de-drag-over {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.de-canvas rect.actor,
+.de-canvas g.actor-man,
+.de-canvas text.messageText,
+.de-canvas line.messageLine0,
+.de-canvas line.messageLine1,
+.de-canvas path.messageLine0,
+.de-canvas path.messageLine1,
+.de-canvas rect.note,
+.de-canvas text.noteText {
+  cursor: pointer;
+}
+
+.de-canvas rect.actor.de-selected,
+.de-canvas g.actor-man.de-selected {
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+
+.de-canvas text.messageText.de-selected,
+.de-canvas text.noteText.de-selected {
+  fill: var(--accent) !important;
+  font-weight: 700;
+}
+
+.de-canvas line.messageLine0.de-selected,
+.de-canvas line.messageLine1.de-selected,
+.de-canvas path.messageLine0.de-selected,
+.de-canvas path.messageLine1.de-selected {
+  stroke: var(--accent) !important;
+  stroke-width: 2.5px !important;
+}
+
+.de-canvas rect.note.de-selected {
+  stroke: var(--accent) !important;
+  stroke-width: 2.5px !important;
+}
+
 #wysiwyg-pane .ProseMirror {
   outline: none;
   min-height: 100%;

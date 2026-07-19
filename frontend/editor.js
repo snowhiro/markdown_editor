@@ -54,6 +54,33 @@ class SourceEditor {
     this.view.focus();
   }
 
+  // テキストをブロックとして挿入する。coords（クリック座標）があれば
+  // その位置へカーソルを移してから、現在行の後ろに前後空行を確保して挿入する。
+  // cursorOffsetは挿入テキスト先頭からのカーソル配置位置。
+  insertBlock(text, coords = null, cursorOffset = 0) {
+    const view = this.view;
+    if (coords) {
+      const pos = view.posAtCoords(coords);
+      if (pos != null) view.dispatch({ selection: { anchor: pos } });
+    }
+    const state = view.state;
+    const line = state.doc.lineAt(state.selection.main.head);
+    const prefix = line.text.trim() === "" ? "" : "\n\n";
+    // 直後が空行ならそのまま区切りとして使い、空行の二重化を避ける
+    let suffix = "\n";
+    if (line.number < state.doc.lines) {
+      const next = state.doc.line(line.number + 1);
+      suffix = next.text.trim() === "" ? "" : "\n";
+    }
+    const insertPos = line.to;
+    view.dispatch({
+      changes: { from: insertPos, insert: prefix + text + suffix },
+      selection: { anchor: insertPos + prefix.length + cursorOffset },
+      scrollIntoView: true,
+    });
+    view.focus();
+  }
+
   getScrollFraction() {
     const el = this.view.scrollDOM;
     const max = el.scrollHeight - el.clientHeight;

@@ -85,6 +85,34 @@ const filePathEl = document.getElementById("file-path");
 
 let renderSeq = 0;
 
+// Mermaidのシーケンス図は矢印先端のSVG marker要素を固定ID（arrowhead等）で
+// 定義するため、Preview/WYSIWYG両ペインが同じ図を描画するとIDが衝突する。
+// url(#id)参照は文書内で最初の同IDに解決されるので、その定義が非表示ペイン
+// 内にあると矢印の先端が描画されない。ペイン固有の接頭辞でIDを一意化する。
+const SEQ_MARKER_IDS = ["arrowhead", "crosshead", "filled-head", "sequencenumber"];
+
+function localizeSeqMarkerIds(svgEl, prefix) {
+  const renamed = new Map();
+  for (const id of SEQ_MARKER_IDS) {
+    for (const el of svgEl.querySelectorAll(`[id="${id}"]`)) {
+      el.id = `${prefix}-${id}`;
+      renamed.set(id, el.id);
+    }
+  }
+  if (renamed.size === 0) return;
+  for (const el of svgEl.querySelectorAll("[marker-end], [marker-start]")) {
+    for (const attr of ["marker-end", "marker-start"]) {
+      const value = el.getAttribute(attr);
+      if (!value) continue;
+      for (const [oldId, newId] of renamed) {
+        if (value.includes(`#${oldId})`)) {
+          el.setAttribute(attr, value.replace(`#${oldId})`, `#${newId})`));
+        }
+      }
+    }
+  }
+}
+
 async function render() {
   const seq = ++renderSeq;
   previewEl.innerHTML = md.render(state.markdown);
@@ -98,7 +126,44 @@ async function render() {
       console.warn("mermaid render error:", err);
     }
   }
+  if (seq !== renderSeq) return;
+  previewEl.querySelectorAll("pre.mermaid svg").forEach((svg, i) => {
+    localizeSeqMarkerIds(svg, `preview-${seq}-${i}`);
+  });
 }
+
+// ---- エクスポート（HTML/PDF: spec.md 7章） ----
+
+// 現在の文書をPreviewと同じ方法でレンダリングし、本文HTML（Mermaid図は
+// SVG描画済み）を返す。CSS埋め込みとファイル書き出しはPython側が行う。
+// 画面外の作業用要素で描画するため、表示中のモードには影響しない。
+window.exportHtml = async () => {
+  const holder = document.createElement("div");
+  // display:noneではMermaidがサイズを測れないため、画面外に配置して描画する
+  holder.style.position = "fixed";
+  holder.style.left = "-99999px";
+  holder.style.width = "800px";
+  holder.className = "markdown-body";
+  holder.innerHTML = md.render(state.markdown);
+  document.body.appendChild(holder);
+  try {
+    const nodes = holder.querySelectorAll("pre.mermaid");
+    if (nodes.length > 0) {
+      try {
+        await window.mermaid.run({ nodes });
+      } catch (err) {
+        console.warn("mermaid render error (export):", err);
+      }
+      const prefix = `export-${Date.now()}`;
+      holder.querySelectorAll("pre.mermaid svg").forEach((svg, i) => {
+        localizeSeqMarkerIds(svg, `${prefix}-${i}`);
+      });
+    }
+    return holder.innerHTML;
+  } finally {
+    holder.remove();
+  }
+};
 
 // ---- Edit モード ----
 
@@ -194,6 +259,199 @@ async function switchMode(mode) {
 document.querySelectorAll(".mode-tab").forEach((btn) => {
   btn.addEventListener("click", () => switchMode(btn.dataset.mode));
 });
+
+// ---- 右クリックメニュー（テーブル挿入: spec.md 5.1） ----
+
+const TABLE_GRID_COLS = 10;
+const TABLE_GRID_ROWS = 8;
+
+// 全セル空のGFMテーブルを生成する（rowsはヘッダー行を含む。最低ヘッダー+データ1行）
+function genTableMarkdown(rows, cols) {
+  rows = Math.max(2, rows);
+  const emptyRow = `|${"  |".repeat(cols)}`;
+  const delim = `|${" --- |".repeat(cols)}`;
+  const lines = [emptyRow, delim];
+  for (let i = 0; i < rows - 1; i++) lines.push(emptyRow);
+  return lines.join("\n");
+}
+
+let ctxMenuEl = null;
+let ctxMenuCloser = null;
+
+function closeContextMenu() {
+  if (!ctxMenuEl) return;
+  ctxMenuEl.remove();
+  ctxMenuEl = null;
+  document.removeEventListener("mousedown", ctxMenuCloser, true);
+  document.removeEventListener("keydown", onContextMenuKeyDown, true);
+}
+
+function onContextMenuKeyDown(e) {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeContextMenu();
+  }
+}
+
+// 挿入するMermaid図の既定テンプレート（GUIエディタで開ける最小構成）
+const FLOWCHART_TEMPLATE = 'flowchart TB\n    n1["新規ノード"]';
+const SEQUENCE_TEMPLATE =
+  "sequenceDiagram\n    participant p1 as 参加者1\n    participant p2 as 参加者2\n    p1->>p2: メッセージ";
+
+// テーブルサイズ選択のグリッドピッカー（サブメニュー中身）を生成する
+function buildTableGridPicker(onPick) {
+  const panel = document.createElement("div");
+  panel.className = "acm-submenu";
+
+  const grid = document.createElement("div");
+  grid.className = "tg-grid";
+  grid.style.gridTemplateColumns = `repeat(${TABLE_GRID_COLS}, 1fr)`;
+  const cells = [];
+  for (let r = 1; r <= TABLE_GRID_ROWS; r++) {
+    for (let c = 1; c <= TABLE_GRID_COLS; c++) {
+      const cell = document.createElement("div");
+      cell.className = "tg-cell";
+      cell.dataset.r = r;
+      cell.dataset.c = c;
+      cells.push(cell);
+      grid.appendChild(cell);
+    }
+  }
+  panel.appendChild(grid);
+
+  const label = document.createElement("div");
+  label.className = "tg-label";
+  label.textContent = "サイズを選択";
+  panel.appendChild(label);
+
+  const highlight = (hr, hc) => {
+    for (const cell of cells) {
+      cell.classList.toggle(
+        "active",
+        Number(cell.dataset.r) <= hr && Number(cell.dataset.c) <= hc
+      );
+    }
+    label.textContent = hr > 0 ? `${hr}行×${hc}列` : "サイズを選択";
+  };
+
+  grid.addEventListener("mouseover", (e) => {
+    const cell = e.target.closest(".tg-cell");
+    if (cell) highlight(Number(cell.dataset.r), Number(cell.dataset.c));
+  });
+  grid.addEventListener("mouseleave", () => highlight(0, 0));
+  grid.addEventListener("click", (e) => {
+    const cell = e.target.closest(".tg-cell");
+    if (!cell) return;
+    onPick(Number(cell.dataset.r), Number(cell.dataset.c));
+  });
+
+  return panel;
+}
+
+function openInsertMenu(x, y, { onTable, onDiagram }) {
+  closeContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "app-context-menu";
+
+  // テーブル（1階層奥のサブメニューでマス目を選択）
+  const tableItem = document.createElement("button");
+  tableItem.type = "button";
+  tableItem.className = "acm-item";
+  tableItem.textContent = "テーブル";
+  const arrow = document.createElement("span");
+  arrow.className = "acm-sub-arrow";
+  arrow.textContent = "▸";
+  tableItem.appendChild(arrow);
+  menu.appendChild(tableItem);
+
+  const submenu = buildTableGridPicker((rows, cols) => {
+    closeContextMenu();
+    onTable(rows, cols);
+  });
+  submenu.hidden = true;
+  menu.appendChild(submenu);
+
+  const showSubmenu = () => {
+    submenu.hidden = false;
+    const itemRect = tableItem.getBoundingClientRect();
+    submenu.style.left = `${itemRect.right + 2}px`;
+    submenu.style.top = `${itemRect.top - 4}px`;
+    // 画面外にはみ出す場合は位置を補正する
+    const rect = submenu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      submenu.style.left = `${itemRect.left - rect.width - 2}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      submenu.style.top = `${window.innerHeight - rect.height - 4}px`;
+    }
+  };
+  tableItem.addEventListener("mouseenter", showSubmenu);
+  tableItem.addEventListener("click", showSubmenu);
+
+  // Mermaid図（フローチャート / シーケンス図）
+  for (const [labelText, source] of [
+    ["フローチャート", FLOWCHART_TEMPLATE],
+    ["シーケンス図", SEQUENCE_TEMPLATE],
+  ]) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "acm-item";
+    item.textContent = labelText;
+    item.addEventListener("mouseenter", () => {
+      submenu.hidden = true;
+    });
+    item.addEventListener("click", () => {
+      closeContextMenu();
+      onDiagram(source);
+    });
+    menu.appendChild(item);
+  }
+
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  document.body.appendChild(menu);
+  ctxMenuEl = menu;
+
+  // 画面外にはみ出す場合は位置を補正する
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = `${x - rect.width}px`;
+  if (rect.bottom > window.innerHeight) menu.style.top = `${y - rect.height}px`;
+
+  ctxMenuCloser = (ev) => {
+    if (!menu.contains(ev.target)) closeContextMenu();
+  };
+  document.addEventListener("mousedown", ctxMenuCloser, true);
+  document.addEventListener("keydown", onContextMenuKeyDown, true);
+}
+
+function onPaneContextMenu(e) {
+  // GUI編集ダイアログ（.de-overlay）表示中はダイアログ側のメニューを優先する
+  if (document.querySelector(".de-overlay")) return;
+  e.preventDefault();
+  const coords = { x: e.clientX, y: e.clientY };
+  openInsertMenu(e.clientX, e.clientY, {
+    onTable: (rows, cols) => {
+      if (state.mode === "wysiwyg" && wysiwyg) {
+        // rowsはヘッダー行を含む（1行選択時はヘッダー+データ1行を保証）
+        wysiwyg.insertTable(Math.max(2, rows), cols);
+      } else if (state.mode === "edit" && editor) {
+        // カーソルを先頭セル内（"| "の直後）に置く
+        editor.insertBlock(genTableMarkdown(rows, cols), coords, 2);
+      }
+    },
+    onDiagram: (source) => {
+      if (state.mode === "wysiwyg" && wysiwyg) {
+        wysiwyg.insertDiagram(source);
+      } else if (state.mode === "edit" && editor) {
+        editor.insertBlock("```mermaid\n" + source + "\n```", coords, 0);
+      }
+    },
+  });
+}
+
+wysiwygPane.addEventListener("contextmenu", onPaneContextMenu);
+editorPane.addEventListener("contextmenu", onPaneContextMenu);
 
 // ---- 文書の差し替え（ファイルオープン・新規作成） ----
 

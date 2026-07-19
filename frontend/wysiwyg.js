@@ -12,15 +12,22 @@ import "prosemirror-view/style/prosemirror.css";
 import "prosemirror-tables/style/tables.css";
 import "prosemirror-gapcursor/style/gapcursor.css";
 
-import { Editor, defaultValueCtx, rootCtx } from "@milkdown/core";
+import { Editor, defaultValueCtx, rootCtx, editorViewCtx } from "@milkdown/core";
 import { commonmark } from "@milkdown/preset-commonmark";
 import { gfm } from "@milkdown/preset-gfm";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { history } from "@milkdown/plugin-history";
 import { clipboard } from "@milkdown/plugin-clipboard";
 import { diagram, diagramSchema, mermaidConfigCtx } from "@milkdown/plugin-diagram";
+import {
+  tableSchema,
+  tableRowSchema,
+  tableHeaderRowSchema,
+  tableCellSchema,
+  tableHeaderSchema,
+} from "@milkdown/preset-gfm";
 import { getMarkdown, replaceAll, $view, $prose } from "@milkdown/utils";
-import { Plugin } from "@milkdown/prose/state";
+import { Plugin, Selection } from "@milkdown/prose/state";
 import {
   addColumnAfter,
   addColumnBefore,
@@ -32,6 +39,8 @@ import {
 } from "@milkdown/prose/tables";
 import mermaid from "mermaid";
 
+import { openDiagramEditor, localizeSeqMarkerIds } from "./diagram-editor.js";
+
 // ---- Mermaid図のNodeView ----
 
 let diagramCounter = 0;
@@ -40,7 +49,8 @@ function renderDiagram(dom, value) {
   const renderId = `diagram-render-${++diagramCounter}`;
   mermaid.render(renderId, value).then(
     ({ svg }) => {
-      dom.innerHTML = svg;
+      // marker IDの衝突対策（localizeSeqMarkerIds参照）
+      dom.innerHTML = localizeSeqMarkerIds(svg, renderId);
     },
     (err) => {
       // 描画失敗時はソースとエラーを表示する（mermaidがbodyに残す要素も掃除）
@@ -54,16 +64,32 @@ function renderDiagram(dom, value) {
   );
 }
 
-const diagramView = $view(diagramSchema.node, () => (initialNode) => {
+const diagramView = $view(diagramSchema.node, () => (initialNode, view, getPos) => {
   const dom = document.createElement("div");
   dom.dataset.type = "diagram";
   dom.className = "diagram";
-  renderDiagram(dom, initialNode.attrs.value);
+  dom.title = "ダブルクリックでGUI編集";
+
+  let currentValue = initialNode.attrs.value;
+
+  dom.addEventListener("dblclick", async (e) => {
+    e.preventDefault();
+    const result = await openDiagramEditor(currentValue);
+    if (result != null && result !== currentValue) {
+      const pos = getPos();
+      if (typeof pos === "number") {
+        view.dispatch(view.state.tr.setNodeAttribute(pos, "value", result));
+      }
+    }
+  });
+
+  renderDiagram(dom, currentValue);
   return {
     dom,
     update: (node) => {
       if (node.type.name !== "diagram") return false;
-      renderDiagram(dom, node.attrs.value);
+      currentValue = node.attrs.value;
+      renderDiagram(dom, currentValue);
       return true;
     },
     ignoreMutation: () => true,
@@ -198,6 +224,17 @@ const tableToolbar = $prose(
     })
 );
 
+// 選択位置がテーブル内にある場合、そのテーブル直後の挿入位置を返す（それ以外はnull）。
+// テーブル内でreplaceSelectionWithするとテーブルが分割されてしまうため、
+// ブロック要素の挿入はテーブルの外へ逃がす。
+function blockInsertPos(state) {
+  const { $from } = state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    if ($from.node(d).type.name === "table") return $from.after(d);
+  }
+  return null;
+}
+
 // ---- エディタ本体 ----
 
 class WysiwygEditor {
@@ -242,6 +279,61 @@ class WysiwygEditor {
 
   getMarkdown() {
     return this.editor.action(getMarkdown());
+  }
+
+  // カーソル位置に空のテーブルを挿入する（rowsはヘッダー行を含む）。
+  // preset-gfmのinsertTableCommandはセルのalignmentがデフォルトの"left"になり
+  // 区切り行が「:---」でシリアライズされるため、揃え指定なし（---）となるよう
+  // alignment: null のセルで自前構築する。
+  insertTable(rows, cols) {
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const attrs = { alignment: null };
+      const makeRow = (rowType, cellType) =>
+        rowType.create(
+          null,
+          Array.from({ length: cols }, () => cellType.createAndFill(attrs))
+        );
+      const rowNodes = [
+        makeRow(tableHeaderRowSchema.type(ctx), tableHeaderSchema.type(ctx)),
+      ];
+      for (let i = 0; i < rows - 1; i++) {
+        rowNodes.push(makeRow(tableRowSchema.type(ctx), tableCellSchema.type(ctx)));
+      }
+      const table = tableSchema.type(ctx).create(null, rowNodes);
+      const outsidePos = blockInsertPos(state);
+      let tr;
+      let cursorFrom;
+      if (outsidePos != null) {
+        tr = state.tr.insert(outsidePos, table);
+        cursorFrom = outsidePos;
+      } else {
+        cursorFrom = state.selection.from;
+        tr = state.tr.replaceSelectionWith(table);
+      }
+      // カーソルをテーブルの先頭セルへ移す
+      const sel = Selection.findFrom(tr.doc.resolve(cursorFrom), 1, true);
+      if (sel) tr.setSelection(sel);
+      view.dispatch(tr.scrollIntoView());
+      view.focus();
+    });
+  }
+
+  // カーソル位置にMermaid図ブロックを挿入する
+  insertDiagram(source) {
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const node = diagramSchema.type(ctx).create({ value: source });
+      const outsidePos = blockInsertPos(state);
+      const tr =
+        outsidePos != null
+          ? state.tr.insert(outsidePos, node)
+          : state.tr.replaceSelectionWith(node);
+      view.dispatch(tr.scrollIntoView());
+      view.focus();
+    });
   }
 
   setMarkdown(doc) {
