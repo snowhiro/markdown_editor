@@ -12,7 +12,16 @@ import { languages } from "@codemirror/language-data";
 import { oneDark } from "@codemirror/theme-one-dark";
 
 class SourceEditor {
-  constructor(parent, { doc = "", dark = false, onChange = null } = {}) {
+  constructor(
+    parent,
+    {
+      doc = "",
+      dark = false,
+      onChange = null,
+      onPasteImage = null,
+      imageFromClipboard = null,
+    } = {}
+  ) {
     this._themeCompartment = new Compartment();
     this.view = new EditorView({
       parent,
@@ -24,6 +33,18 @@ class SourceEditor {
           markdown({ base: markdownLanguage, codeLanguages: languages }),
           EditorView.lineWrapping,
           this._themeCompartment.of(dark ? oneDark : []),
+          // クリップボードが画像のみの場合は貼り付けを横取りして
+          // 画像保存＋リンク挿入を行う（spec.md 5.2）
+          EditorView.domEventHandlers({
+            paste: (event) => {
+              if (!onPasteImage || !imageFromClipboard) return false;
+              const file = imageFromClipboard(event.clipboardData);
+              if (!file) return false; // 通常のテキスト貼り付けに任せる
+              event.preventDefault();
+              onPasteImage(file);
+              return true;
+            },
+          }),
           EditorView.updateListener.of((update) => {
             if (update.docChanged && onChange) {
               onChange(update.state.doc.toString());
@@ -51,6 +72,17 @@ class SourceEditor {
   }
 
   focus() {
+    this.view.focus();
+  }
+
+  // カーソル位置（選択範囲を置換）にインラインテキストを挿入する
+  insertText(text) {
+    const { from, to } = this.view.state.selection.main;
+    this.view.dispatch({
+      changes: { from, to, insert: text },
+      selection: { anchor: from + text.length },
+      scrollIntoView: true,
+    });
     this.view.focus();
   }
 

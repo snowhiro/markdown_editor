@@ -9,15 +9,17 @@ Python側は常に最新の内容を保持しており、保存・終了確認�
 改行コードはファイルごとに検出して保持し、内部処理はLFに正規化する。
 """
 
+import base64
 import html as html_module
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QImage, QKeySequence
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -72,11 +74,20 @@ flowchart LR
 """
 
 
+class AppWebPage(QWebEnginePage):
+    """JSコンソール出力をstderrへ中継するページ（不具合調査用）。"""
+
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):
+        print(f"[js] {source_id}:{line_number}: {message}", file=sys.stderr)
+
+
 class Bridge(QObject):
     """Python⇔JS間のブリッジ。JS側では `bridge` という名前で参照される。"""
 
     # 文書の差し替えをJSへ通知する (パス, 内容)。新規作成時はパスは空文字列
     fileOpened = Signal(str, str)
+    # 保存等でファイルパスが変わったことをJSへ通知する（相対パス画像の解決に使用）
+    pathChanged = Signal(str)
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
@@ -97,6 +108,11 @@ class Bridge(QObject):
     @Slot(str)
     def exportBody(self, body: str) -> None:
         self.window.on_export_body(body)
+
+    @Slot(str, result=str)
+    def savePastedImage(self, data_b64: str) -> str:
+        """貼り付け画像を保存し、文書からの相対パスを返す（失敗/中止時は空文字列）。"""
+        return self.window.save_pasted_image(data_b64)
 
     @Slot(str)
     def log(self, message: str) -> None:
@@ -121,6 +137,13 @@ class MainWindow(QMainWindow):
         self._export_tmp: Path | None = None
 
         self.view = QWebEngineView(self)
+        # JSコンソール出力をターミナルへ中継する（不具合調査用）
+        self.view.setPage(AppWebPage(self.view))
+        # 文書フォルダ基準の相対パス画像（file://）をfile://のページから
+        # 読み込めるようにする（spec.md 5.2 相対パス画像の表示）
+        self.view.page().settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
+        )
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -365,6 +388,9 @@ class MainWindow(QMainWindow):
         self.load_path(Path(path_str))
 
     def load_path(self, path: Path) -> None:
+        # CLI引数などで相対パスが渡された場合も、JS側の相対パス画像の解決や
+        # 保存先の決定が正しく動くよう絶対パスに正規化する
+        path = path.expanduser().resolve()
         try:
             # newline="" で改行変換を無効化し、元の改行コードを検出できるようにする
             with path.open(encoding="utf-8", newline="") as f:
@@ -405,6 +431,7 @@ class MainWindow(QMainWindow):
         return self._write_to(Path(path_str))
 
     def _write_to(self, path: Path) -> bool:
+        path = path.expanduser().resolve()
         data = self.current_content
         if self.newline != "\n":
             data = data.replace("\n", self.newline)
@@ -413,10 +440,54 @@ class MainWindow(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{e}")
             return False
+        path_changed = self.current_path != path
         self.current_path = path
         self.saved_content = self.current_content
         self._update_title()
+        if path_changed:
+            # 相対パス画像の解決基準が変わるためJSへ通知する
+            self.bridge.pathChanged.emit(str(path))
         return True
+
+    # ---- クリップボード画像の貼り付け（spec.md 5.2） ----
+
+    def save_pasted_image(self, data_b64: str) -> str:
+        """Base64の画像データを文書と同階層のimage/へPNGで保存する。
+
+        未保存の新規文書の場合は先に「名前を付けて保存」ダイアログを開き、
+        キャンセルされたら貼り付け全体を中止する（空文字列を返す）。
+        """
+        if self.current_path is None:
+            if not self.save_as():
+                return ""
+        try:
+            raw = base64.b64decode(data_b64)
+        except (ValueError, TypeError):
+            return ""
+        image = QImage()
+        if not image.loadFromData(raw):
+            return ""
+
+        img_dir = self.current_path.parent / "image"
+        try:
+            img_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.critical(self, "エラー", f"imageフォルダを作成できませんでした:\n{e}")
+            return ""
+
+        # タイムスタンプ名。同名衝突時は連番を付加する
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        name = f"image-{stamp}.png"
+        counter = 2
+        while (img_dir / name).exists():
+            name = f"image-{stamp}-{counter}.png"
+            counter += 1
+
+        # 形式によらずPNGに変換して保存する（spec: PNG固定）
+        if not image.save(str(img_dir / name), "PNG"):
+            QMessageBox.critical(self, "エラー", "画像の保存に失敗しました")
+            return ""
+        return f"image/{name}"
 
     # ---- エクスポート（HTML/PDF: spec.md 7章） ----
 

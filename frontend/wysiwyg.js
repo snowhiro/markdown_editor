@@ -13,7 +13,7 @@ import "prosemirror-tables/style/tables.css";
 import "prosemirror-gapcursor/style/gapcursor.css";
 
 import { Editor, defaultValueCtx, rootCtx, editorViewCtx } from "@milkdown/core";
-import { commonmark } from "@milkdown/preset-commonmark";
+import { commonmark, imageSchema } from "@milkdown/preset-commonmark";
 import { gfm } from "@milkdown/preset-gfm";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { history } from "@milkdown/plugin-history";
@@ -95,6 +95,49 @@ const diagramView = $view(diagramSchema.node, () => (initialNode, view, getPos) 
     ignoreMutation: () => true,
   };
 });
+
+// ---- 画像（相対パス解決とクリップボード貼り付け: spec.md 5.2） ----
+
+// 相対パス画像を文書フォルダ基準で表示するためのNodeView。
+// Markdown上のsrc（相対パス）は保持したまま、表示時のみ
+// app.jsのresolveDocResourceでfile:// URLへ解決する。
+const imageView = $view(imageSchema.node, () => (initialNode) => {
+  const img = document.createElement("img");
+  const apply = (node) => {
+    const src = node.attrs.src || "";
+    img.src = window.resolveDocResource ? window.resolveDocResource(src) : src;
+    img.alt = node.attrs.alt || "";
+    if (node.attrs.title) img.title = node.attrs.title;
+  };
+  apply(initialNode);
+  return {
+    dom: img,
+    update: (node) => {
+      if (node.type.name !== "image") return false;
+      apply(node);
+      return true;
+    },
+  };
+});
+
+// 画像貼り付けハンドラ（app.jsからWysiwygEditor.create時に注入される）
+const pasteHandlers = { onPasteImage: null, imageFromClipboard: null };
+
+const imagePaste = $prose(
+  () =>
+    new Plugin({
+      props: {
+        handlePaste: (_view, event) => {
+          const { onPasteImage, imageFromClipboard } = pasteHandlers;
+          if (!onPasteImage || !imageFromClipboard) return false;
+          const file = imageFromClipboard(event.clipboardData);
+          if (!file) return false; // 通常のテキスト貼り付けに任せる
+          onPasteImage(file);
+          return true; // 既定の貼り付け処理を抑止
+        },
+      },
+    })
+);
 
 // ---- タスクリストのクリックトグル ----
 
@@ -238,10 +281,21 @@ function blockInsertPos(state) {
 // ---- エディタ本体 ----
 
 class WysiwygEditor {
-  static async create(parent, { doc = "", dark = false, onChange = null } = {}) {
+  static async create(
+    parent,
+    {
+      doc = "",
+      dark = false,
+      onChange = null,
+      onPasteImage = null,
+      imageFromClipboard = null,
+    } = {}
+  ) {
     const instance = new WysiwygEditor();
     instance._onChange = onChange;
     instance._applying = false;
+    pasteHandlers.onPasteImage = onPasteImage;
+    pasteHandlers.imageFromClipboard = imageFromClipboard;
 
     instance.editor = await Editor.make()
       .config((ctx) => {
@@ -270,6 +324,8 @@ class WysiwygEditor {
       .use(clipboard)
       .use(diagram)
       .use(diagramView)
+      .use(imageView)
+      .use(imagePaste)
       .use(taskToggle)
       .use(tableToolbar)
       .create();
@@ -316,6 +372,16 @@ class WysiwygEditor {
       const sel = Selection.findFrom(tr.doc.resolve(cursorFrom), 1, true);
       if (sel) tr.setSelection(sel);
       view.dispatch(tr.scrollIntoView());
+      view.focus();
+    });
+  }
+
+  // カーソル位置に画像（インラインノード）を挿入する
+  insertImage(src, alt = "") {
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const node = imageSchema.type(ctx).create({ src, alt });
+      view.dispatch(view.state.tr.replaceSelectionWith(node).scrollIntoView());
       view.focus();
     });
   }

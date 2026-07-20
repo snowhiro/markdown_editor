@@ -113,9 +113,34 @@ function localizeSeqMarkerIds(svgEl, prefix) {
   }
 }
 
+// 文書内の相対パス（例: image/xxx.png）を文書フォルダ基準のfile:// URLへ
+// 解決する（spec.md 5.2）。絶対URL・データURL等はそのまま返す。
+// WYSIWYG側（wysiwyg-bundle）の画像NodeViewからも参照される。
+function resolveDocResource(src) {
+  if (!src || !state.filePath) return src;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("/")) return src;
+  const dir = state.filePath.replace(/[\\/][^\\/]*$/, "");
+  let base = dir.replace(/\\/g, "/");
+  if (!base.startsWith("/")) base = "/" + base; // Windowsのドライブレター対応
+  // 記述側で%エンコード済みのパスは二重エンコードを避ける
+  return src.includes("%")
+    ? `file://${encodeURI(base)}/${src}`
+    : encodeURI(`file://${base}/${src}`);
+}
+window.resolveDocResource = resolveDocResource;
+
+function resolvePreviewImages(root) {
+  root.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    const resolved = resolveDocResource(src);
+    if (resolved !== src) img.src = resolved;
+  });
+}
+
 async function render() {
   const seq = ++renderSeq;
   previewEl.innerHTML = md.render(state.markdown);
+  resolvePreviewImages(previewEl);
 
   const nodes = previewEl.querySelectorAll("pre.mermaid");
   if (nodes.length === 0) return;
@@ -130,6 +155,33 @@ async function render() {
   previewEl.querySelectorAll("pre.mermaid svg").forEach((svg, i) => {
     localizeSeqMarkerIds(svg, `preview-${seq}-${i}`);
   });
+}
+
+// ---- クリップボード画像の貼り付け（spec.md 5.2） ----
+
+// クリップボードから画像ファイルを取り出す。テキストを含む場合は
+// テキスト貼り付けを優先するためnullを返す（画像のみのとき有効）。
+function clipboardImageFile(dt) {
+  if (!dt || !bridge) return null;
+  if (dt.getData && dt.getData("text/plain")) return null;
+  for (const item of dt.items ?? []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      return item.getAsFile();
+    }
+  }
+  return null;
+}
+
+// 画像ファイルをPython側へ渡して保存し、相対パスをコールバックで受け取る
+function savePastedImage(file, onSaved) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const b64 = String(reader.result).replace(/^data:[^,]*,/, "");
+    bridge.savePastedImage(b64, (relPath) => {
+      if (relPath) onSaved(relPath);
+    });
+  };
+  reader.readAsDataURL(file);
 }
 
 // ---- エクスポート（HTML/PDF: spec.md 7章） ----
@@ -177,6 +229,12 @@ function ensureEditor() {
       state.markdown = docText;
       if (bridge) bridge.contentChanged(docText);
     },
+    onPasteImage: (file) => {
+      savePastedImage(file, (relPath) => {
+        editor.insertText(`![](${relPath})`);
+      });
+    },
+    imageFromClipboard: clipboardImageFile,
   });
 }
 
@@ -193,6 +251,12 @@ async function ensureWysiwyg() {
       state.markdown = docText;
       if (bridge) bridge.contentChanged(docText);
     },
+    onPasteImage: (file) => {
+      savePastedImage(file, (relPath) => {
+        wysiwyg.insertImage(relPath);
+      });
+    },
+    imageFromClipboard: clipboardImageFile,
   });
 }
 
@@ -522,6 +586,12 @@ if (typeof qt !== "undefined" && qt.webChannelTransport) {
   new QWebChannel(qt.webChannelTransport, (channel) => {
     bridge = channel.objects.bridge;
     bridge.fileOpened.connect((path, content) => setDocument(path, content));
+    // 保存等でパスが変わったら相対パス画像の解決基準を更新する
+    bridge.pathChanged.connect((path) => {
+      state.filePath = path || null;
+      filePathEl.textContent = path || "";
+      if (state.mode === "preview") render();
+    });
     // Python側が初期文書（CLI引数のファイル or ウェルカム文書）を送ってくる
     bridge.ready();
   });
