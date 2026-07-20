@@ -21,12 +21,49 @@ npm run build   # frontend/ を web/vendor/editor-bundle.js にバンドル
 
 ## 起動
 
+「開発環境セットアップ」（`pip install -e .` と `npm run build`）を一度実行した後、
+以下のいずれかのコマンドでアプリを起動できる。
+
 ```bash
-markdown-editor           # または: python -m markdown_editor.main
-markdown-editor path/to/file.md   # ファイルを指定して起動
+# 仮想環境を有効化していない場合は先に実行
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+markdown-editor                    # コンソールスクリプト（pip install -e . で登録済み）
+python -m markdown_editor.main     # 上と同じ内容をモジュール実行で起動する場合
+markdown-editor path/to/file.md    # 起動時に指定したMarkdownファイルを開く
 ```
 
-「ファイル > 開く...」（Cmd/Ctrl+O）でMarkdownファイルを開けます。
+どちらのコマンドも同じアプリを起動する。`markdown-editor` コマンドが見つからない場合は、
+`pip install -e .` を実行した仮想環境が有効化されているか確認する
+（`which markdown-editor` で仮想環境内のパスが表示されれば正しく認識されている）。
+
+起動直後はファイルパスを指定しなければウェルカム文書がPreviewモードで表示される。
+そこから以下の方法でMarkdownファイルを開ける。
+
+* メニューの「ファイル > 開く...」（ショートカット: Cmd/Ctrl+O）
+* 起動時にコマンドライン引数でファイルパスを渡す（上記 `markdown-editor path/to/file.md`）
+
+保存は「ファイル > 保存」（Cmd/Ctrl+S）、別名保存は「ファイル > 名前を付けて保存...」
+（Cmd/Ctrl+Shift+S）から行う。未保存の変更があるとタイトルバーに `*` が表示され、
+別のファイルを開く・アプリを終了する際に保存確認ダイアログが出る。
+
+### frontend/ を編集した場合
+
+`frontend/editor.js`・`frontend/wysiwyg.js`・`frontend/diagram-editor.js` 等を変更した場合は、
+アプリを再起動する前に `npm run build` を再実行して `src/markdown_editor/web/vendor/` の
+バンドルを更新する必要がある（Pythonコード側の変更のみであれば再ビルド不要）。
+変更を継続的に反映させたい場合は `npm run watch` でファイル変更を監視できる。
+
+### うまく起動しない場合
+
+* **WYSIWYG / Edit モードが真っ白、またはコンソールにモジュール読み込みエラーが出る**:
+  `npm install && npm run build` が未実行、または失敗している可能性が高い。
+  `src/markdown_editor/web/vendor/` に `editor-bundle.js` と `wysiwyg-bundle.js` が
+  生成されているか確認する
+* **`markdown-editor: command not found`**: 仮想環境が有効化されていないか、
+  `pip install -e .` が未実行
+* **`ModuleNotFoundError: No module named 'PySide6'`**: 仮想環境の外でPythonを実行している。
+  `source .venv/bin/activate` を実行してから再度コマンドを実行する
 
 ## 構成
 
