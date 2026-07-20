@@ -65,6 +65,23 @@ markdown-editor path/to/file.md    # 起動時に指定したMarkdownファイ�
 * **`ModuleNotFoundError: No module named 'PySide6'`**: 仮想環境の外でPythonを実行している。
   `source .venv/bin/activate` を実行してから再度コマンドを実行する
 
+## 配布用パッケージング（.app / .exe）
+
+PyInstallerで、Python実行環境のインストールが不要な単体の配布物（macOS: `.app`、Windows: `.exe`）を生成できる。
+
+```bash
+pip install -e ".[build]"   # pyinstallerを導入（初回のみ）
+npm run build               # フロントエンドのバンドルを最新化（未実行なら）
+
+pyinstaller packaging/markdown_editor.spec --noconfirm
+```
+
+生成物は `dist/Markdown Editor.app`（macOS）に出力される。`--noconfirm` は既存の `build/` / `dist/` を確認なしで上書きする。
+
+* specファイルは `src/markdown_editor/web/` 一式（`vendor/` の外部ライブラリ含む）を `markdown_editor/web` としてアプリ内に同梱する
+* `frontend/` を変更した場合は、パッケージング前に必ず `npm run build` を実行してバンドルを更新すること
+* ビルド後は `open "dist/Markdown Editor.app"` で起動確認できる
+
 ## 構成
 
 ```

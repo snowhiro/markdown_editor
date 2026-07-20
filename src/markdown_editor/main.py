@@ -16,26 +16,39 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QImage, QKeySequence
+from PySide6.QtCore import QEvent, QModelIndex, QObject, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QImage, QKeySequence
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFileSystemModel,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSizePolicy,
+    QSplitter,
     QToolButton,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
-WEB_DIR = Path(__file__).resolve().parent / "web"
+if getattr(sys, "frozen", False):
+    # PyInstallerでパッケージ化した場合、エントリポイントスクリプト（main.py）の
+    # __file__ はパッケージ階層を保持せずバンドル直下に置かれるため、
+    # __file__基準では web/ を見つけられない。sys._MEIPASS
+    # （展開先ルート。packaging/markdown_editor.spec のdatasで
+    # markdown_editor/web として同梱している）を基準に解決する。
+    WEB_DIR = Path(sys._MEIPASS) / "markdown_editor" / "web"
+else:
+    WEB_DIR = Path(__file__).resolve().parent / "web"
 
 WELCOME_MARKDOWN = """\
 # Markdown Editor
@@ -75,10 +88,24 @@ flowchart LR
 
 
 class AppWebPage(QWebEnginePage):
-    """JSコンソール出力をstderrへ中継するページ（不具合調査用）。"""
+    """JSコンソール出力の中継と、リンククリックによる意図しないページ内遷移の抑止を行う。
+
+    リンク先の実際の振り分け（アプリ内で開く / OS既定のアプリで開く）はJS側の
+    クリックハンドラが `bridge.handleLinkClick()` 経由で行う（spec.md 5.3）。
+    ここでの抑止は、その経路を取り漏れた場合に備えた安全網であり、
+    アプリ自身（index.html）へのナビゲーションは妨げない。
+    """
 
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
         print(f"[js] {source_id}:{line_number}: {message}", file=sys.stderr)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        if (
+            is_main_frame
+            and nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+        ):
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
 
 class Bridge(QObject):
@@ -115,6 +142,11 @@ class Bridge(QObject):
         return self.window.save_pasted_image(data_b64)
 
     @Slot(str)
+    def handleLinkClick(self, href: str) -> None:
+        """Preview/WYSIWYG内のリンククリックを振り分ける（spec.md 5.3）。"""
+        self.window.handle_link_click(href)
+
+    @Slot(str)
     def log(self, message: str) -> None:
         print(f"[web] {message}", file=sys.stderr)
 
@@ -135,6 +167,10 @@ class MainWindow(QMainWindow):
         self._export_target: tuple[Path, str] | None = None
         self._export_view: QWebEngineView | None = None
         self._export_tmp: Path | None = None
+
+        # ファイルツリー（spec.md 9.1）
+        self.tree_root: Path | None = None
+        self._tree_shown_pref = True
 
         self.view = QWebEngineView(self)
         # JSコンソール出力をターミナルへ中継する（不具合調査用）
@@ -159,7 +195,16 @@ class MainWindow(QMainWindow):
         self.search_bar.setVisible(False)
         layout.addWidget(self.search_bar)
         layout.addWidget(self.view, 1)
-        self.setCentralWidget(central)
+
+        self.tree_view = self._build_tree_view()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.addWidget(self.tree_view)
+        splitter.addWidget(central)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([220, 780])
+        self.setCentralWidget(splitter)
 
         self.view.page().findTextFinished.connect(self._on_find_finished)
 
@@ -187,6 +232,10 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
+
+        open_folder_action = QAction("フォルダを開く...", self)
+        open_folder_action.triggered.connect(self.open_folder)
+        file_menu.addAction(open_folder_action)
 
         file_menu.addSeparator()
 
@@ -216,6 +265,15 @@ class MainWindow(QMainWindow):
         self.search_action.setShortcut(QKeySequence.StandardKey.Find)
         self.search_action.triggered.connect(self.show_search)
         edit_menu.addAction(self.search_action)
+
+        view_menu = self.menuBar().addMenu("表示")
+
+        self.tree_toggle_action = QAction("ファイルツリー", self)
+        self.tree_toggle_action.setCheckable(True)
+        self.tree_toggle_action.setChecked(True)
+        self.tree_toggle_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.tree_toggle_action.triggered.connect(self._on_tree_toggle)
+        view_menu.addAction(self.tree_toggle_action)
 
     # ---- 検索（Previewモード） ----
 
@@ -320,6 +378,118 @@ class MainWindow(QMainWindow):
         if mode != "preview" and self.search_bar.isVisible():
             self.close_search()
 
+    # ---- ファイルツリー（spec.md 9.1） ----
+
+    def _build_tree_view(self) -> QTreeView:
+        self.fs_model = QFileSystemModel(self)
+        self.fs_model.setNameFilters(["*.md", "*.markdown"])
+        self.fs_model.setNameFilterDisables(False)  # フィルタ対象外のファイルは非表示にする
+
+        tree = QTreeView(self)
+        tree.setModel(self.fs_model)
+        tree.setHeaderHidden(True)
+        # ファイル名列以外（サイズ・種類・更新日時）は表示しない
+        for col in range(1, self.fs_model.columnCount()):
+            tree.setColumnHidden(col, True)
+        tree.clicked.connect(self._on_tree_clicked)
+        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        # ルート未確定の間は空表示にする（_update_tree_visibilityが可視性を制御）
+        tree.setVisible(False)
+        return tree
+
+    def _update_tree_visibility(self) -> None:
+        self.tree_view.setVisible(self._tree_shown_pref and self.tree_root is not None)
+
+    def _on_tree_toggle(self, checked: bool) -> None:
+        self._tree_shown_pref = checked
+        self._update_tree_visibility()
+
+    def _set_tree_root(self, folder: Path) -> None:
+        folder = folder.expanduser().resolve()
+        index = self.fs_model.setRootPath(str(folder))
+        self.tree_view.setRootIndex(index)
+        self.tree_root = folder
+        self._update_tree_visibility()
+
+    def _is_under_tree_root(self, path: Path) -> bool:
+        if self.tree_root is None:
+            return False
+        try:
+            path.relative_to(self.tree_root)
+            return True
+        except ValueError:
+            return False
+
+    def _maybe_update_tree_root(self, path: Path) -> None:
+        if not self._is_under_tree_root(path):
+            self._set_tree_root(path.parent)
+        self._select_in_tree(path)
+
+    def _select_in_tree(self, path: Path) -> None:
+        index = self.fs_model.index(str(path))
+        if index.isValid():
+            self.tree_view.setCurrentIndex(index)
+            self.tree_view.scrollTo(index)
+
+    def open_folder(self) -> None:
+        path_str = QFileDialog.getExistingDirectory(
+            self,
+            "フォルダを開く",
+            str(self.tree_root or (self.current_path.parent if self.current_path else Path.home())),
+        )
+        if path_str:
+            self._set_tree_root(Path(path_str))
+
+    def _on_tree_clicked(self, index) -> None:
+        if self.fs_model.isDir(index):
+            return
+        path = Path(self.fs_model.filePath(index)).resolve()
+        if self.current_path is not None and path == self.current_path:
+            return
+        if not self._confirm_discard():
+            # クリックでズレた選択状態を現在のファイルへ戻す
+            if self.current_path is not None:
+                self._select_in_tree(self.current_path)
+            return
+        self.load_path(path)
+
+    def _on_tree_context_menu(self, pos) -> None:
+        if self.tree_root is None:
+            return
+        index = self.tree_view.indexAt(pos)
+        if index.isValid():
+            entry = Path(self.fs_model.filePath(index))
+            target_dir = entry if self.fs_model.isDir(index) else entry.parent
+        else:
+            target_dir = self.tree_root
+
+        menu = QMenu(self)
+        new_file_action = menu.addAction("新規Markdownファイル...")
+        chosen = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+        if chosen == new_file_action:
+            self._create_new_markdown_file(target_dir)
+
+    def _create_new_markdown_file(self, folder: Path) -> None:
+        name, ok = QInputDialog.getText(self, "新規Markdownファイル", "ファイル名:", text="無題.md")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if not name.lower().endswith((".md", ".markdown")):
+            name += ".md"
+        target = folder / name
+        if target.exists():
+            QMessageBox.critical(self, "エラー", f"同名のファイルが既に存在します:\n{target}")
+            return
+        if not self._confirm_discard():
+            return
+        try:
+            target.write_text("", encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "エラー", f"ファイルを作成できませんでした:\n{e}")
+            return
+        self.load_path(target)
+
     # ---- 状態管理 ----
 
     @property
@@ -371,6 +541,7 @@ class MainWindow(QMainWindow):
         self.current_content = ""
         self.saved_content = ""
         self.newline = "\n"
+        self.tree_view.setCurrentIndex(QModelIndex())
         self.bridge.fileOpened.emit("", "")
         self._update_title()
 
@@ -406,6 +577,7 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self.current_content = content
         self.saved_content = content
+        self._maybe_update_tree_root(path)
         self.bridge.fileOpened.emit(str(path), content)
         self._update_title()
 
@@ -445,8 +617,11 @@ class MainWindow(QMainWindow):
         self.saved_content = self.current_content
         self._update_title()
         if path_changed:
+            self._maybe_update_tree_root(path)
             # 相対パス画像の解決基準が変わるためJSへ通知する
             self.bridge.pathChanged.emit(str(path))
+        else:
+            self._select_in_tree(path)
         return True
 
     # ---- クリップボード画像の貼り付け（spec.md 5.2） ----
@@ -488,6 +663,40 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "エラー", "画像の保存に失敗しました")
             return ""
         return f"image/{name}"
+
+    # ---- リンクのクリック挙動（spec.md 5.3） ----
+
+    def handle_link_click(self, href: str) -> None:
+        """Preview/WYSIWYG内のリンククリックを振り分ける。
+
+        相対/絶対パスの .md / .markdown は現在の文書フォルダを基準に解決して
+        アプリ内で開き、それ以外（外部URL・その他のファイル）はOS既定の
+        ブラウザ/アプリケーションへ委譲する。文書内アンカー（#のみ）はJS側で
+        除外されるため、ここには渡ってこない。
+        """
+        url = QUrl(href)
+        scheme = url.scheme().lower()
+        if scheme and scheme != "file":
+            # http / https / mailto 等の外部リンク
+            QDesktopServices.openUrl(url)
+            return
+
+        raw_path = url.toLocalFile() if url.isLocalFile() else url.path()
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            base = self.current_path.parent if self.current_path else Path.cwd()
+            candidate = base / candidate
+        try:
+            target = candidate.resolve()
+        except OSError:
+            target = candidate
+
+        if target.suffix.lower() in (".md", ".markdown"):
+            if not self._confirm_discard():
+                return
+            self.load_path(target)
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     # ---- エクスポート（HTML/PDF: spec.md 7章） ----
 

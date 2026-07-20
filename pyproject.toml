@@ -8,6 +8,11 @@ dependencies = [
     "PySide6>=6.8",
 ]
 
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0",
+]
+
 [project.scripts]
 markdown-editor = "markdown_editor.main:main"
 

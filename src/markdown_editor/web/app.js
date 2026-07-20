@@ -137,6 +137,26 @@ function resolvePreviewImages(root) {
   });
 }
 
+// ---- リンクのクリック挙動（spec.md 5.3） ----
+// ページ内遷移はAppWebPage側でも抑止されるが、実際の振り分け（アプリ内で
+// 開く/OS既定のアプリで開く）はこちらでhrefを判定してbridgeへ委譲する。
+// 文書内アンカー（#のみ）は対象外とし、既定の動作（何もしない）に任せる。
+
+function onLinkClick(e, { requireModifier }) {
+  const a = e.target.closest("a[href]");
+  if (!a) return;
+  const href = a.getAttribute("href") || "";
+  if (!href || href.startsWith("#")) return;
+  // WYSIWYG（編集可能領域）ではリンクテキストの編集を妨げないよう、
+  // 修飾キー付きクリックのみを遷移として扱う
+  if (requireModifier && !(e.metaKey || e.ctrlKey)) return;
+  e.preventDefault();
+  if (bridge) bridge.handleLinkClick(href);
+}
+
+previewEl.addEventListener("click", (e) => onLinkClick(e, { requireModifier: false }));
+wysiwygRoot.addEventListener("click", (e) => onLinkClick(e, { requireModifier: true }));
+
 async function render() {
   const seq = ++renderSeq;
   previewEl.innerHTML = md.render(state.markdown);
