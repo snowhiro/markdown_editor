@@ -114,6 +114,46 @@ body {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ---- 分割プレビュー（spec.md 4.1） ---- */
+
+#content.split {
+  flex-direction: row;
+}
+
+/* 幅比はJS側がflex-basisで設定する（既定50%） */
+#content.split > #editor-pane {
+  flex: 0 0 50%;
+  min-width: 240px;
+}
+
+#content.split > #preview-pane {
+  flex: 1 1 0;
+  min-width: 240px;
+  border-left: 1px solid var(--border);
+}
+
+#split-divider {
+  flex: 0 0 6px;
+  background: var(--toolbar-bg);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  cursor: col-resize;
+}
+
+#split-divider:hover,
+#split-divider.dragging {
+  background: var(--accent);
+}
+
+/* ドラッグ中はテキスト選択やホバー判定を抑止する */
+body.split-dragging {
+  user-select: none;
+}
+
+body.split-dragging * {
+  cursor: col-resize !important;
+}
+
 /* ---- WYSIWYG（Milkdown） ---- */
 
 #wysiwyg-pane {

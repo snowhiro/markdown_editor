@@ -20,6 +20,7 @@ class SourceEditor {
       onChange = null,
       onPasteImage = null,
       imageFromClipboard = null,
+      onScroll = null,
     } = {}
   ) {
     this._themeCompartment = new Compartment();
@@ -53,6 +54,12 @@ class SourceEditor {
         ],
       }),
     });
+
+    // 分割プレビューのスクロール連動（spec.md 4.1）用。scrollイベントはDOM上を
+    // バブルしないため、EditorView.domEventHandlers ではなくスクロール要素へ直接登録する。
+    if (onScroll) {
+      this.view.scrollDOM.addEventListener("scroll", onScroll, { passive: true });
+    }
   }
 
   getDoc() {

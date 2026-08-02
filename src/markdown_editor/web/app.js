@@ -7,6 +7,7 @@
  *   JS→Python: bridge.ready()            初期化完了通知（Pythonはこれを受けて初期文書を送る）
  *              bridge.contentChanged(md) 編集内容の同期（保存・未保存管理用）
  *   Python→JS: bridge.fileOpened(path, content) 文書の差し替え（新規作成時は path="")
+ *              bridge.splitPreviewToggled(on)   Editモードの分割プレビュー切替
  */
 
 "use strict";
@@ -71,14 +72,18 @@ initMermaid();
 prefersDark.addEventListener("change", () => {
   initMermaid();
   if (editor) editor.setDark(prefersDark.matches);
-  if (state.mode === "preview") render();
+  // Mermaid図のSVGはテーマ配色を焼き込んでいるためキャッシュを捨てて再描画する
+  mermaidCache.clear();
+  if (state.mode === "preview" || splitActive) render();
 });
 
 // ---- Preview 描画 ----
 
+const contentEl = document.getElementById("content");
 const previewPane = document.getElementById("preview-pane");
 const previewEl = document.getElementById("preview");
 const editorPane = document.getElementById("editor-pane");
+const dividerEl = document.getElementById("split-divider");
 const wysiwygPane = document.getElementById("wysiwyg-pane");
 const wysiwygRoot = document.getElementById("wysiwyg-root");
 const filePathEl = document.getElementById("file-path");
@@ -157,24 +162,62 @@ function onLinkClick(e, { requireModifier }) {
 previewEl.addEventListener("click", (e) => onLinkClick(e, { requireModifier: false }));
 wysiwygRoot.addEventListener("click", (e) => onLinkClick(e, { requireModifier: true }));
 
+// Mermaid図の描画結果キャッシュ（図のソース文字列 → 描画済みSVGのHTML）。
+// 分割プレビュー（spec.md 4.1）は入力のたびにPreviewを再描画するため、
+// ソースが変わっていない図は再実行せずキャッシュを再利用する。
+// テーマ変更時はSVGの配色が変わるためクリアする。
+const mermaidCache = new Map();
+let mermaidCacheSeq = 0;
+
+async function renderMermaid(seq) {
+  const nodes = Array.from(previewEl.querySelectorAll("pre.mermaid"));
+  if (nodes.length === 0) {
+    mermaidCache.clear();
+    return;
+  }
+
+  // ソースはmermaid.runで上書きされるため、先に控えておく
+  const sources = nodes.map((node) => node.textContent);
+  const pending = [];
+  nodes.forEach((node, i) => {
+    const cached = mermaidCache.get(sources[i]);
+    if (cached) {
+      node.innerHTML = cached;
+      node.setAttribute("data-processed", "true");
+    } else {
+      pending.push({ node, source: sources[i] });
+    }
+  });
+
+  if (pending.length > 0) {
+    try {
+      await window.mermaid.run({ nodes: pending.map((p) => p.node) });
+    } catch (err) {
+      if (seq === renderSeq) console.warn("mermaid render error:", err);
+    }
+    if (seq !== renderSeq) return;
+    for (const { node, source } of pending) {
+      const svg = node.querySelector("svg");
+      if (!svg) continue;
+      // マーカーIDはソースごとに固有の接頭辞を与える。キャッシュ再利用時も
+      // IDが変わらないため、再描画のたびに参照が壊れることはない。
+      localizeSeqMarkerIds(svg, `mmd-${++mermaidCacheSeq}`);
+      mermaidCache.set(source, node.innerHTML);
+    }
+  }
+
+  // 文書から消えた図のキャッシュを破棄する
+  const alive = new Set(sources);
+  for (const key of mermaidCache.keys()) {
+    if (!alive.has(key)) mermaidCache.delete(key);
+  }
+}
+
 async function render() {
   const seq = ++renderSeq;
   previewEl.innerHTML = md.render(state.markdown);
   resolvePreviewImages(previewEl);
-
-  const nodes = previewEl.querySelectorAll("pre.mermaid");
-  if (nodes.length === 0) return;
-  try {
-    await window.mermaid.run({ nodes });
-  } catch (err) {
-    if (seq === renderSeq) {
-      console.warn("mermaid render error:", err);
-    }
-  }
-  if (seq !== renderSeq) return;
-  previewEl.querySelectorAll("pre.mermaid svg").forEach((svg, i) => {
-    localizeSeqMarkerIds(svg, `preview-${seq}-${i}`);
-  });
+  await renderMermaid(seq);
 }
 
 // ---- クリップボード画像の貼り付け（spec.md 5.2） ----
@@ -248,6 +291,7 @@ function ensureEditor() {
       if (applyingExternal) return;
       state.markdown = docText;
       if (bridge) bridge.contentChanged(docText);
+      scheduleSplitRender();
     },
     onPasteImage: (file) => {
       savePastedImage(file, (relPath) => {
@@ -255,6 +299,7 @@ function ensureEditor() {
       });
     },
     imageFromClipboard: clipboardImageFile,
+    onScroll: onEditorScroll,
   });
 }
 
@@ -268,6 +313,10 @@ async function ensureWysiwyg() {
     dark: prefersDark.matches,
     onChange: (docText) => {
       wysiwygDoc = docText;
+      // Milkdownはこちらからの setMarkdown に対しても非同期に変更を通知する。
+      // WYSIWYGが非表示のときのこの通知を採用すると、その間に他モードで
+      // 行われた編集を古い内容で巻き戻してしまうため無視する。
+      if (state.mode !== "wysiwyg") return;
       state.markdown = docText;
       if (bridge) bridge.contentChanged(docText);
     },
@@ -286,6 +335,154 @@ function getScrollFraction(el) {
   const max = el.scrollHeight - el.clientHeight;
   return max > 0 ? el.scrollTop / max : 0;
 }
+
+function setScrollFraction(el, fraction) {
+  el.scrollTop = fraction * (el.scrollHeight - el.clientHeight);
+}
+
+// ---- 分割プレビュー（spec.md 4.1） ----
+
+const MIN_PANE_WIDTH = 240; // 各ペインの最小幅(px)
+const SPLIT_RENDER_DELAY = 300; // 入力停止から再描画までの待ち時間(ms)
+
+// splitPreview: ユーザー設定（表示メニューのチェック状態）
+// splitActive:  実際に分割表示しているか（Editモードかつ幅が足りる場合のみ真）
+let splitPreview = false;
+let splitActive = false;
+let splitRatio = 0.5;
+let splitRenderTimer = null;
+// プレビュー側を直接スクロールしている間は編集側への追従を止める
+let previewFollowsEditor = true;
+let syncingPreviewScroll = false;
+
+function splitFits() {
+  return contentEl.clientWidth >= MIN_PANE_WIDTH * 2 + dividerWidth();
+}
+
+function dividerWidth() {
+  return dividerEl.offsetWidth || 8;
+}
+
+// 現在のモード・設定・ウィンドウ幅から各ペインの表示状態を決める
+function applyLayout() {
+  splitActive = state.mode === "edit" && splitPreview && splitFits();
+
+  contentEl.classList.toggle("split", splitActive);
+  editorPane.hidden = state.mode !== "edit";
+  wysiwygPane.hidden = state.mode !== "wysiwyg";
+  previewPane.hidden = !(state.mode === "preview" || splitActive);
+  dividerEl.hidden = !splitActive;
+
+  if (splitActive) {
+    clampSplitRatio();
+    editorPane.style.flexBasis = `${splitRatio * 100}%`;
+  } else {
+    editorPane.style.flexBasis = "";
+  }
+}
+
+// 両ペインが最小幅を確保できる範囲に幅比を丸める
+function clampSplitRatio() {
+  const width = contentEl.clientWidth - dividerWidth();
+  if (width <= 0) return;
+  const min = MIN_PANE_WIDTH / width;
+  if (min >= 0.5) {
+    splitRatio = 0.5;
+    return;
+  }
+  splitRatio = Math.min(Math.max(splitRatio, min), 1 - min);
+}
+
+// 表示メニューからの切替（Python側 bridge.splitPreviewToggled が起点）
+function setSplitPreview(on) {
+  splitPreview = !!on;
+  const wasActive = splitActive;
+  applyLayout();
+  if (splitActive && !wasActive) {
+    previewFollowsEditor = true;
+    renderSplitPreview();
+    if (editor) editor.focus();
+  }
+}
+window.setSplitPreview = setSplitPreview;
+
+function scheduleSplitRender() {
+  if (!splitActive) return;
+  clearTimeout(splitRenderTimer);
+  splitRenderTimer = setTimeout(renderSplitPreview, SPLIT_RENDER_DELAY);
+}
+
+// 再描画してもスクロール位置が先頭へ戻らないようにする。
+// 編集側へ追従中は編集側の位置に合わせ、そうでなければ元の位置を復元する。
+async function renderSplitPreview() {
+  clearTimeout(splitRenderTimer);
+  splitRenderTimer = null;
+  if (!splitActive) return;
+  const fraction = getScrollFraction(previewPane);
+  await render();
+  if (!splitActive) return;
+  syncingPreviewScroll = true;
+  setScrollFraction(
+    previewPane,
+    previewFollowsEditor && editor ? editor.getScrollFraction() : fraction
+  );
+  requestAnimationFrame(() => {
+    syncingPreviewScroll = false;
+  });
+}
+
+// 編集側のスクロールに合わせてプレビュー側を同じ比率へ移動する（一方向）
+function onEditorScroll() {
+  if (!splitActive || !editor) return;
+  previewFollowsEditor = true;
+  syncingPreviewScroll = true;
+  setScrollFraction(previewPane, editor.getScrollFraction());
+  requestAnimationFrame(() => {
+    syncingPreviewScroll = false;
+  });
+}
+
+previewPane.addEventListener(
+  "scroll",
+  () => {
+    // プログラム側からの移動（追従）は利用者の操作とみなさない
+    if (splitActive && !syncingPreviewScroll) previewFollowsEditor = false;
+  },
+  { passive: true }
+);
+
+// ディバイダのドラッグによる幅比の変更
+dividerEl.addEventListener("pointerdown", (e) => {
+  if (!splitActive) return;
+  e.preventDefault();
+  const rect = contentEl.getBoundingClientRect();
+  dividerEl.setPointerCapture(e.pointerId);
+  dividerEl.classList.add("dragging");
+  document.body.classList.add("split-dragging");
+
+  const onMove = (ev) => {
+    splitRatio = (ev.clientX - rect.left) / (rect.width - dividerWidth());
+    clampSplitRatio();
+    editorPane.style.flexBasis = `${splitRatio * 100}%`;
+  };
+  const onUp = () => {
+    dividerEl.removeEventListener("pointermove", onMove);
+    dividerEl.removeEventListener("pointerup", onUp);
+    dividerEl.removeEventListener("pointercancel", onUp);
+    dividerEl.classList.remove("dragging");
+    document.body.classList.remove("split-dragging");
+  };
+  dividerEl.addEventListener("pointermove", onMove);
+  dividerEl.addEventListener("pointerup", onUp);
+  dividerEl.addEventListener("pointercancel", onUp);
+});
+
+// ウィンドウ幅が最小幅を割った場合は分割を一時解除し、広がれば復帰する
+window.addEventListener("resize", () => {
+  const wasActive = splitActive;
+  applyLayout();
+  if (splitActive && !wasActive) renderSplitPreview();
+});
 
 async function switchMode(mode) {
   if (mode === state.mode) return;
@@ -309,12 +506,15 @@ async function switchMode(mode) {
     fraction = getScrollFraction(previewPane);
   }
 
-  previewPane.hidden = mode !== "preview";
-  editorPane.hidden = mode !== "edit";
-  wysiwygPane.hidden = mode !== "wysiwyg";
+  // 分割プレビューから離れる場合、プレビューは既に描画済みのため
+  // その表示位置を引き継げるよう先に控えておく（spec.md 4.1）
+  const keepPreviewScroll = splitActive && mode === "preview";
+  const previewFraction = keepPreviewScroll ? getScrollFraction(previewPane) : 0;
+
+  if (mode === "edit") ensureEditor();
+  applyLayout();
 
   if (mode === "edit") {
-    ensureEditor();
     if (editor.getDoc() !== state.markdown) {
       applyingExternal = true;
       editor.setDoc(state.markdown);
@@ -322,8 +522,16 @@ async function switchMode(mode) {
     }
     editor.setScrollFraction(fraction);
     editor.focus();
+    if (splitActive) {
+      previewFollowsEditor = true;
+      renderSplitPreview();
+    }
   } else if (mode === "wysiwyg") {
     await ensureWysiwyg();
+    // 初期化を待つ間にさらに別モードへ切り替わっていた場合は中断する。
+    // 中断しないと、切替後のモードで行った編集を初期化前の内容で
+    // 上書きしてしまう（Milkdownのバックグラウンド初期化との競合）。
+    if (state.mode !== mode) return;
     // 他モードで編集された場合のみ反映する
     // （未編集での再設定はMilkdownの再シリアライズによる書式正規化を招くため避ける）
     if (wysiwygDoc !== state.markdown) {
@@ -332,10 +540,12 @@ async function switchMode(mode) {
     }
     wysiwygPane.scrollTop =
       fraction * (wysiwygPane.scrollHeight - wysiwygPane.clientHeight);
+  } else if (keepPreviewScroll) {
+    // 分割表示中のプレビューをそのまま全面表示に切り替える（再描画不要）
+    setScrollFraction(previewPane, previewFraction);
   } else {
     render().then(() => {
-      previewPane.scrollTop =
-        fraction * (previewPane.scrollHeight - previewPane.clientHeight);
+      setScrollFraction(previewPane, fraction);
     });
   }
 }
@@ -558,6 +768,11 @@ function setDocument(path, content) {
     previewPane.scrollTop = 0;
   } else if (state.mode === "edit" && editor) {
     editor.setScrollFraction(0);
+    if (splitActive) {
+      previewFollowsEditor = true;
+      previewPane.scrollTop = 0;
+      renderSplitPreview();
+    }
   } else if (state.mode === "wysiwyg") {
     wysiwygPane.scrollTop = 0;
   }
@@ -607,6 +822,8 @@ if (typeof qt !== "undefined" && qt.webChannelTransport) {
     bridge = channel.objects.bridge;
     bridge.fileOpened.connect((path, content) => setDocument(path, content));
     // 保存等でパスが変わったら相対パス画像の解決基準を更新する
+    // 表示メニューからの分割プレビュー切替（spec.md 4.1）
+    bridge.splitPreviewToggled.connect((on) => setSplitPreview(on));
     bridge.pathChanged.connect((path) => {
       state.filePath = path || null;
       filePathEl.textContent = path || "";

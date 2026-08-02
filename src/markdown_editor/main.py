@@ -115,6 +115,8 @@ class Bridge(QObject):
     fileOpened = Signal(str, str)
     # 保存等でファイルパスが変わったことをJSへ通知する（相対パス画像の解決に使用）
     pathChanged = Signal(str)
+    # Editモードの分割プレビューの表示/非表示をJSへ通知する（spec.md 4.1）
+    splitPreviewToggled = Signal(bool)
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
@@ -275,6 +277,16 @@ class MainWindow(QMainWindow):
         self.tree_toggle_action.triggered.connect(self._on_tree_toggle)
         view_menu.addAction(self.tree_toggle_action)
 
+        # Editモードの分割プレビュー（spec.md 4.1）。切替はJS側が担うため
+        # チェック状態をそのままブリッジのシグナルへ流す。
+        self.split_preview_action = QAction("プレビューを分割表示", self)
+        self.split_preview_action.setCheckable(True)
+        self.split_preview_action.setChecked(False)
+        self.split_preview_action.setShortcut(QKeySequence("Ctrl+\\"))
+        self.split_preview_action.setEnabled(False)  # Editモードでのみ有効
+        self.split_preview_action.triggered.connect(self.bridge.splitPreviewToggled)
+        view_menu.addAction(self.split_preview_action)
+
     # ---- 検索（Previewモード） ----
 
     def _build_search_bar(self) -> QWidget:
@@ -375,6 +387,9 @@ class MainWindow(QMainWindow):
     def on_mode_changed(self, mode: str) -> None:
         self.current_mode = mode
         self.search_action.setEnabled(mode == "preview")
+        # 分割プレビューはEditモード専用（spec.md 4.1）。チェック状態は
+        # 保持したままにし、Editモードへ戻ったときに前回の状態を復元する。
+        self.split_preview_action.setEnabled(mode == "edit")
         if mode != "preview" and self.search_bar.isVisible():
             self.close_search()
 

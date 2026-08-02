@@ -40,55 +40,80 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 
 ## 2. レイヤーと責務
 
-| レイヤー | 主なファイル | 責務 |
-| --- | --- | --- |
-| Pythonアプリシェル | `main.py` | ウィンドウ／メニュー／ファイルI/O／ファイルツリー／エクスポート（PDF/HTML）／貼り付け画像の保存。`QWebChannel`で`bridge`オブジェクトをJSへ公開 |
-| Web UI 基盤 | `web/index.html`, `web/app.js`, `web/styles.css` | 3モードのペイン切替、markdown-itによるPreviewレンダリング、右クリックメニュー、Pythonブリッジの受け口 |
-| Edit モード | `frontend/editor.js` | CodeMirror 6ラッパー（`SourceEditor`）。ブロック挿入APIを提供 |
-| WYSIWYG モード | `frontend/wysiwyg.js` | Milkdownラッパー（`WysiwygEditor`）。画像・図・テーブルのNodeView、貼り付けハンドラ |
-| Mermaid GUI編集 | `frontend/diagram-editor.js` | フローチャート/シーケンス図の専用編集ダイアログ（`DiagramEditorDialog` / `SequenceEditorDialog`） |
+| レイヤー          | 主なファイル                                           | 責務                                                                                       |
+| ------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Pythonアプリシェル  | `main.py`                                        | ウィンドウ／メニュー／ファイルI/O／ファイルツリー／エクスポート（PDF/HTML）／貼り付け画像の保存。`QWebChannel`で`bridge`オブジェクトをJSへ公開 |
+| Web UI 基盤     | `web/index.html`, `web/app.js`, `web/styles.css` | 3モードのペイン切替、markdown-itによるPreviewレンダリング、右クリックメニュー、Pythonブリッジの受け口                          |
+| Edit モード      | `frontend/editor.js`                             | CodeMirror 6ラッパー（`SourceEditor`）。ブロック挿入APIを提供                                            |
+| WYSIWYG モード   | `frontend/wysiwyg.js`                            | Milkdownラッパー（`WysiwygEditor`）。画像・図・テーブルのNodeView、貼り付けハンドラ                                |
+| Mermaid GUI編集 | `frontend/diagram-editor.js`                     | フローチャート/シーケンス図の専用編集ダイアログ（`DiagramEditorDialog` / `SequenceEditorDialog`）                 |
 
 ## 3. 主要な型・クラス
 
 ### main.py
 
 * `AppWebPage(QWebEnginePage)` — JSコンソール出力をstderrへ中継
-* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `log`。Python→JS: `fileOpened` / `pathChanged`（Signal）
+
+* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `handleLinkClick` / `log`。Python→JS: `fileOpened` / `pathChanged` / `splitPreviewToggled`（Signal）
+
 * `MainWindow(QMainWindow)` — 本体。役割ごとに以下のセクションに分かれる
+
   * メニュー構築（`_build_menu`）
+
   * 検索（`show_search` 他、Previewモードのみ）
+
   * ファイルツリー（`_build_tree_view` 他、spec.md 9.1）
+
   * ファイル操作（`new_file` / `open_file` / `load_path` / `save` / `save_as` / `_write_to`）
+
   * クリップボード画像保存（`save_pasted_image`、spec.md 5.2）
+
   * エクスポート（`export_html_dialog` / `export_pdf_dialog` / `_print_pdf`、spec.md 7章）
 
 ### web/app.js
 
 * `state` — `{ markdown, filePath, mode }`。Single Source of Truthをここに保持
-* `render()` — Previewのレンダリング（markdown-it → Mermaid描画 → 画像パス解決）
+
+* `render()` — Previewのレンダリング（markdown-it → 画像パス解決 → `renderMermaid()`）
+
+* `renderMermaid()` — Mermaid図の描画。ソース文字列をキーにSVGをキャッシュし、変化していない図は再描画しない（分割プレビューの再描画コスト対策）
+
 * `resolveDocResource()` — 文書フォルダ基準で相対パスを`file://`へ解決（`window`に公開しWYSIWYG側からも参照）
+
 * `clipboardImageFile()` / `savePastedImage()` — 貼り付け画像の抽出とブリッジ経由保存
+
 * `openInsertMenu()` — 右クリックメニュー（テーブルのグリッドピッカー／フローチャート／シーケンス図）
+
 * `switchMode()` / `setDocument()` — モード切替と文書差し替えの中心ロジック
+
+* `applyLayout()` / `setSplitPreview()` / `renderSplitPreview()` — Editモードの分割プレビュー（spec.md 4.1）。ペインの表示状態・幅比の決定、デバウンス再描画、編集→プレビューのスクロール連動
 
 ### frontend/editor.js
 
-* `SourceEditor` — `getDoc` / `setDoc` / `insertBlock`（右クリックメニューからのブロック挿入）/ スクロール位置保持
+* `SourceEditor` — `getDoc` / `setDoc` / `insertBlock`（右クリックメニューからのブロック挿入）/ スクロール位置保持 / `onScroll`（分割プレビューのスクロール連動用の通知）
 
 ### frontend/wysiwyg.js
 
 * `WysiwygEditor` — `getMarkdown` / `setMarkdown` / `insertTable` / `insertDiagram` / `insertImage`
+
 * `diagramView` — Mermaidコードブロックを描画するNodeView（ダブルクリックでGUIエディタ起動）
+
 * `imageView` — 相対パス画像をfile://へ解決して表示するNodeView
+
 * `imagePaste` — 画像クリップボード貼り付けのProseMirrorプラグイン
+
 * `TableToolbarView` — 表内カーソル時に行/列操作ボタンを表示
 
 ### frontend/diagram-editor.js
 
 * `parseFlowchart` / `serialize` — フローチャート ⇔ モデルの相互変換
+
 * `parseSequence` / `serializeSequence` — シーケンス図 ⇔ モデルの相互変換（GUI非対応構文は`reason`付きで拒否）
+
 * `DiagramEditorDialog` — フローチャート編集モーダル
+
 * `SequenceEditorDialog` — シーケンス図編集モーダル（参加者・メッセージ・Note、`over`範囲対応）
+
 * `openDiagramEditor(source)` — 図種を判定して適切なダイアログを開く公開API
 
 ## 4. 処理フロー（フローチャート）
@@ -213,7 +238,37 @@ flowchart TD
     PrintPdf --> Done
 ```
 
+### 4.7 Editモードの分割プレビュー（spec.md 4.1）
+
+```mermaid
+flowchart TD
+    Toggle["表示メニュー: プレビューを分割表示"] --> Signal["bridge.splitPreviewToggled(on)"]
+    Signal --> SetSplit["setSplitPreview(on)"]
+    SetSplit --> Apply["applyLayout(): Editモード かつ 幅が足りる場合のみ分割"]
+    Apply --> Panes["#content に split クラス付与 → 左=編集 / 右=Preview"]
+    Panes --> First["renderSplitPreview() で初回描画"]
+
+    Type["Editモードで編集"] --> OnChange["SourceEditor onChange"]
+    OnChange --> Sync["state.markdown更新 → bridge.contentChanged()"]
+    OnChange --> Debounce["scheduleSplitRender(): 300msのデバウンス"]
+    Debounce --> Rerender["renderSplitPreview()"]
+    Rerender --> Render["render(): markdown-it → renderMermaid()"]
+    Render --> Cache{"図のソースは前回と同じ?"}
+    Cache -->|"同じ"| Reuse["キャッシュのSVGを再利用"]
+    Cache -->|"異なる"| Run["mermaid.run() で再描画しキャッシュ更新"]
+    Rerender --> Keep["スクロール位置を維持（追従中は編集側の比率に合わせる）"]
+
+    Scroll["編集側をスクロール"] --> OnScroll["onEditorScroll()"]
+    OnScroll --> Follow["プレビューを同じ比率へ移動"]
+    ScrollPv["プレビューを直接スクロール"] --> Stop["追従を停止（編集側の操作再開で復帰）"]
+
+    Resize["ウィンドウ幅の変更"] --> Fits{"両ペインが最小幅240pxを確保できる?"}
+    Fits -->|"はい"| Apply
+    Fits -->|"いいえ"| Collapse["分割を一時解除しEditのみ表示"]
+```
+
 ## 5. ビルド・テスト
 
 * フロントエンドのビルド: `npm run build`（`esbuild frontend/editor.js frontend/wysiwyg.js` → `web/vendor/*-bundle.js`）。`frontend/`配下を変更したら再実行が必要
+
 * テスト: `QT_QPA_PLATFORM=offscreen .venv/bin/python tests/<name>.py`（PySide6のオフスクリーン実行、GUIを起動せずCIでも実行可能）
