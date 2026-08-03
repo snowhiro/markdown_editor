@@ -16,7 +16,17 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QModelIndex, QObject, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QEventLoop,
+    QModelIndex,
+    QObject,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QImage, QKeySequence
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -238,6 +248,11 @@ class MainWindow(QMainWindow):
         open_folder_action = QAction("フォルダを開く...", self)
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
+
+        # Excel → Markdown 変換（spec.md 11章）
+        self.import_excel_action = QAction("Excelから変換...", self)
+        self.import_excel_action.triggered.connect(self.import_excel_dialog)
+        file_menu.addAction(self.import_excel_action)
 
         file_menu.addSeparator()
 
@@ -504,6 +519,126 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "エラー", f"ファイルを作成できませんでした:\n{e}")
             return
         self.load_path(target)
+
+    # ---- Excelの取り込み（spec.md 11章） ----
+
+    def import_excel_dialog(self) -> None:
+        base = self.tree_root or (
+            self.current_path.parent if self.current_path else Path.home()
+        )
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Excelファイルを選択",
+            str(base),
+            "Excel (*.xlsx *.xlsm);;すべてのファイル (*)",
+        )
+        if path_str:
+            self.import_excel(Path(path_str))
+
+    def import_excel(self, xlsx_path: Path) -> None:
+        """Excelをシート単位のMarkdownへ変換し、出力先を開く（spec.md 11章）。"""
+        # openpyxlは起動時には不要なため、ここで初めて読み込む
+        try:
+            from . import excel_import
+        except ImportError as e:
+            QMessageBox.critical(
+                self, "エラー", f"Excelの読み込みに必要なライブラリがありません:\n{e}"
+            )
+            return
+
+        xlsx_path = xlsx_path.expanduser().resolve()
+        if xlsx_path.suffix.lower() not in excel_import.SUPPORTED_SUFFIXES:
+            QMessageBox.critical(
+                self,
+                "非対応の形式",
+                f"「{xlsx_path.name}」は変換できません。\n"
+                "対応しているのは .xlsx / .xlsm のみです。",
+            )
+            return
+
+        # 出力先はExcelと同一ディレクトリの「拡張子を除いたファイル名」フォルダ
+        out_dir = xlsx_path.parent / xlsx_path.stem
+        if out_dir.exists() and not out_dir.is_dir():
+            QMessageBox.critical(
+                self, "エラー", f"出力先と同名のファイルが既に存在します:\n{out_dir}"
+            )
+            return
+        if out_dir.is_dir():
+            answer = QMessageBox.question(
+                self,
+                "出力先の確認",
+                f"フォルダが既に存在します。同名のMarkdownファイルを上書きしますか？\n\n{out_dir}",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
+
+        def on_progress(index: int, total: int, name: str) -> None:
+            self.statusBar().showMessage(f"Excelを変換中... {index} / {total} シート（{name}）")
+            # 変換中もステータスバーを更新する。ユーザー入力は処理しない
+            # （変換の最中に別のファイル操作へ入られると状態が壊れるため）
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = excel_import.convert_workbook(
+                xlsx_path, out_dir, progress=on_progress
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "変換失敗",
+                f"Excelファイルを読み込めませんでした:\n{type(e).__name__}: {e}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+
+        self._report_excel_result(xlsx_path, result)
+
+    def _report_excel_result(self, xlsx_path: Path, result) -> None:
+        """変換結果をまとめて報告し、出力先を開く（spec.md 11.7）。"""
+        written = result.written
+        lines = [
+            f"変換元: {xlsx_path.name}",
+            f"出力先: {result.out_dir}",
+            "",
+            f"成功 {len(written)}件 / 失敗 {len(result.failed)}件",
+        ]
+        empty = [s.sheet_name for s in result.sheets if s.skipped == "empty"]
+        if empty:
+            lines.append("内容が無いため出力しなかったシート: " + "、".join(empty))
+        if result.missing_formula_sheets:
+            lines.append(
+                "計算値を取得できなかったセルがあるシート: "
+                + "、".join(result.missing_formula_sheets)
+            )
+        if result.failed:
+            lines.append("")
+            lines.append("失敗したシート:")
+            lines += [f"　・{s.sheet_name}: {s.error}" for s in result.failed]
+        message = "\n".join(lines)
+
+        if not written:
+            QMessageBox.warning(
+                self, "Excelの変換", message + "\n\n出力されたファイルはありません。"
+            )
+            return
+
+        # 生成したフォルダをツリーのルートにしてから先頭シートのmdを開く。
+        # 未保存の変更でキャンセルされた場合もツリーの表示は更新済みにする。
+        self._set_tree_root(result.out_dir)
+        if result.failed:
+            QMessageBox.warning(self, "Excelの変換", message)
+        else:
+            QMessageBox.information(self, "Excelの変換", message)
+        if self._confirm_discard():
+            self.load_path(written[0])
+        self.statusBar().showMessage(f"Excelを変換しました: {result.out_dir}", 5000)
 
     # ---- 状態管理 ----
 

@@ -47,6 +47,18 @@ markdown-editor path/to/file.md    # 起動時に指定したMarkdownファイ�
 （Cmd/Ctrl+Shift+S）から行う。未保存の変更があるとタイトルバーに `*` が表示され、
 別のファイルを開く・アプリを終了する際に保存確認ダイアログが出る。
 
+### ExcelファイルをMarkdownへ変換する
+
+「ファイル > Excelから変換...」で `.xlsx` / `.xlsm` を指定すると、Excelと同じフォルダに
+「拡張子を除いたファイル名」のフォルダが作られ、シートごとに `<シート名>.md` が出力される。
+変換後はそのフォルダがファイルツリーのルートになり、先頭シートのmdが開く。
+
+表かどうかはセルの**罫線**で判定する（2行×2列以上の罫線領域をGFMテーブルに、
+それ以外の行は段落テキストに変換する）。表示形式・太字/斜体/取り消し線・
+ハイパーリンク・セル内改行・結合セルに対応する。画像やグラフなどの描画オブジェクトは
+変換対象外で、含まれていた場合はmdの末尾に注記が入る。詳細は
+[docs/spec.md](docs/spec.md) の11章を参照。
+
 ### frontend/ を編集した場合
 
 `frontend/editor.js`・`frontend/wysiwyg.js`・`frontend/diagram-editor.js` 等を変更した場合は、
@@ -89,6 +101,7 @@ frontend/            # esbuildでバンドルするESMソース
                      # (editor.js: CodeMirror 6 / wysiwyg.js: Milkdown)
 src/markdown_editor/
 ├── main.py          # PySide6 アプリシェル（ウィンドウ・メニュー・ファイルI/O・保存管理）
+├── excel_import.py  # Excel → Markdown 変換（openpyxl。Qt非依存）
 └── web/             # QWebEngineView 内で動作するUI本体
     ├── index.html
     ├── app.js       # Markdownレンダリング・モード管理・Pythonブリッジ

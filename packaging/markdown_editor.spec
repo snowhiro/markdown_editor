@@ -27,7 +27,9 @@ a = Analysis(
     # main.py の WEB_DIR は実行ファイル基準の相対パスで探すため、
     # 展開後も markdown_editor/web に配置されるようにする。
     datas=[(str(WEB_DIR), "markdown_editor/web")],
-    hiddenimports=[],
+    # openpyxl は main.py が実行時に遅延インポートするため明示的に含める
+    # （Excel → Markdown 変換 / spec.md 11章）
+    hiddenimports=["openpyxl"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

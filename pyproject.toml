@@ -6,6 +6,8 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "PySide6>=6.8",
+    # Excel → Markdown 変換（spec.md 11章）
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

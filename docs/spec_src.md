@@ -16,6 +16,7 @@ src/markdown_editor/
 ├── __init__.py
 ├── main.py                     # PySide6 アプリシェル（ウィンドウ・メニュー・
                                  #   ファイルI/O・ファイルツリー・エクスポート・貼り付け画像保存）
+├── excel_import.py             # Excel → Markdown 変換（openpyxl / Qt非依存）
 └── web/                        # QWebEngineView 内で動作するUI本体
     ├── index.html              # ペイン構造・スクリプト読み込み順を定義
     ├── app.js                  # Markdownレンダリング・モード管理・右クリックメニュー・
@@ -35,7 +36,11 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 ├── test_search_layout.py       # 検索バーの高さ（レイアウト崩れ検知）
 ├── test_paste_image.py         # クリップボード画像の保存・相対パス画像の表示解決
 ├── test_export.py              # HTML/PDFエクスポート
-└── test_file_tree.py           # ファイルツリーのルート決定・クリック・新規作成・トグル
+├── test_file_tree.py           # ファイルツリーのルート決定・クリック・新規作成・トグル
+├── test_link_click.py          # リンククリックの振り分け（アプリ内 / OS委譲）
+├── test_split_preview.py       # Editモードの分割プレビュー
+├── test_excel_import.py        # Excel → Markdown 変換ロジック（Qt不要）
+└── test_excel_menu.py          # Excel取り込みのメニュー・ダイアログ・出力先の反映
 ```
 
 ## 2. レイヤーと責務
@@ -47,6 +52,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 | Edit モード      | `frontend/editor.js`                             | CodeMirror 6ラッパー（`SourceEditor`）。ブロック挿入APIを提供                                            |
 | WYSIWYG モード   | `frontend/wysiwyg.js`                            | Milkdownラッパー（`WysiwygEditor`）。画像・図・テーブルのNodeView、貼り付けハンドラ                                |
 | Mermaid GUI編集 | `frontend/diagram-editor.js`                     | フローチャート/シーケンス図の専用編集ダイアログ（`DiagramEditorDialog` / `SequenceEditorDialog`）                 |
+| Excel取り込み     | `excel_import.py`                                | openpyxl／zipによるExcelの読み取りとMarkdown生成。QtもUIも参照しないため単体でテスト可能                              |
 
 ## 3. 主要な型・クラス
 
@@ -69,6 +75,27 @@ tests/                          # オフスクリーンQt結合テスト（PySid
   * クリップボード画像保存（`save_pasted_image`、spec.md 5.2）
 
   * エクスポート（`export_html_dialog` / `export_pdf_dialog` / `_print_pdf`、spec.md 7章）
+
+  * Excel取り込み（`import_excel_dialog` / `import_excel` / `_report_excel_result`、spec.md 11章）
+
+### excel_import.py
+
+Qt非依存の変換ロジック。`main.py` からは実行時に遅延インポートする（起動時のコストを避けるため）。
+
+* `convert_workbook(xlsx_path, out_dir, progress)` — エントリポイント。`ConversionResult` を返す
+
+* `sheet_to_markdown(ws, ...)` — シート1枚をMarkdown本文へ。空文字列は「空シート」を意味する
+
+* `detect_tables(bordered)` — 罫線セルの集合 → テーブル領域の外接矩形リスト（spec.md 11.4）
+
+* `format_value(value, number_format)` — Excelの表示形式を適用。丸めは `Decimal` の四捨五入でExcelに合わせる
+
+* `cell_text(cell, in_table)` / `decorate(...)` — 文字装飾・リンク・改行・`|` のエスケープ（spec.md 11.5）
+
+* `sanitize_sheet_name(name)` / `unique_file_names(names)` — ファイル名の正規化と重複回避（spec.md 11.2）
+
+* `scan_drawing_objects(xlsx_path)` — 描画オブジェクトの検出。openpyxlは未対応図形を含む描画パートを
+  画像・グラフごと読み捨てるため（spec.md 13.1）、xlsxのzipを直接読んで数える
 
 ### web/app.js
 
@@ -266,6 +293,41 @@ flowchart TD
     Fits -->|"はい"| Apply
     Fits -->|"いいえ"| Collapse["分割を一時解除しEditのみ表示"]
 ```
+
+### 4.8 Excel → Markdown 変換（spec.md 11章）
+
+```mermaid
+flowchart TD
+    Menu["ファイル > Excelから変換..."] --> Pick["QFileDialog で .xlsx / .xlsm を選択"]
+    Pick --> Suffix{"対応形式?"}
+    Suffix -->|"いいえ"| Reject["非対応の形式としてエラー表示"]
+    Suffix -->|"はい"| OutDir["出力先 = Excelと同階層の拡張子なしファイル名フォルダ"]
+    OutDir --> Exists{"フォルダが既に存在?"}
+    Exists -->|"はい"| Confirm{"上書き確認"}
+    Confirm -->|"キャンセル"| Abort["何もしない"]
+    Confirm -->|"OK"| Scan
+    Exists -->|"いいえ"| Scan
+
+    Scan["scan_drawing_objects(): zipを直読みして描画オブジェクトを数える"] --> Formula["_collect_formula_cells(): 数式セルの座標を控える"]
+    Formula --> Load["load_workbook(data_only=True)"]
+    Load --> Loop["可視シートを先頭から順に処理（進捗をステータスバーへ）"]
+
+    Loop --> Border["罫線セルを収集（結合セルは範囲全体を占有扱い）"]
+    Border --> Detect["detect_tables(): 4近傍の連結成分 → 外接矩形 → 重なりを統合 → 2行2列未満を除外"]
+    Detect --> Emit["行順に出力: テーブル行はGFMテーブル / それ以外は段落"]
+    Emit --> Cells["cell_text(): 表示形式・装飾・リンク・改行・エスケープ"]
+    Cells --> Note{"描画オブジェクトあり?"}
+    Note -->|"あり"| Append["末尾に注記行を追加"]
+    Note -->|"なし"| Write
+    Append --> Write["&lt;シート名&gt;.md を UTF-8 / LF で書き出し"]
+    Write --> Loop
+
+    Loop --> Report["成功/失敗/空シート/計算値欠落をまとめて報告"]
+    Report --> Tree["_set_tree_root(出力先)"]
+    Tree --> Open["_confirm_discard() を経て先頭シートのmdを開く"]
+```
+
+シート単位の失敗は捕捉して次のシートへ進むため、1枚が壊れていても残りは変換される。
 
 ## 5. ビルド・テスト
 
