@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec: Markdown Editor の配布用アプリを生成する。
 
+onefile（単一実行ファイル）でビルドする。
+
 macOS: dist/Markdown Editor.app
-Windows: dist/Markdown Editor/Markdown Editor.exe
+Windows: dist/Markdown Editor.exe
 
 実行:
     pyinstaller packaging/markdown_editor.spec
@@ -20,7 +22,10 @@ REPO_ROOT = Path.cwd()
 WEB_DIR = REPO_ROOT / "src" / "markdown_editor" / "web"
 
 a = Analysis(
-    [str(REPO_ROOT / "src" / "markdown_editor" / "main.py")],
+    # main.py を直接指定すると `__main__` として実行され、パッケージ内の
+    # 相対import（main.py の `from . import excel_import`）が失敗する。
+    # packaging/entry.py 経由で markdown_editor パッケージとして読み込む。
+    [str(REPO_ROOT / "packaging" / "entry.py")],
     pathex=[str(REPO_ROOT / "src")],
     binaries=[],
     # web/ 以下（HTML/JS/CSS/vendorライブラリ）をアプリ内へ同梱する。
@@ -40,16 +45,23 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# onefile: バイナリ・データをすべてEXEへ取り込み、単一の実行ファイルを生成する。
+# （実行時は一時ディレクトリへ展開され、main.py が sys._MEIPASS 基準で web/ を解決する）
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
+    exclude_binaries=False,
     name="Markdown Editor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -58,20 +70,9 @@ exe = EXE(
     entitlements_file=None,
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="Markdown Editor",
-)
-
 if sys.platform == "darwin":
     app = BUNDLE(
-        coll,
+        exe,
         name="Markdown Editor.app",
         icon=None,
         bundle_identifier="com.example.markdowneditor",

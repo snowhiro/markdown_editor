@@ -88,8 +88,10 @@ npm run build               # フロントエンドのバンドルを最新化�
 pyinstaller packaging/markdown_editor.spec --noconfirm
 ```
 
-生成物は `dist/Markdown Editor.app`（macOS）に出力される。`--noconfirm` は既存の `build/` / `dist/` を確認なしで上書きする。
+生成物は `dist/Markdown Editor.app`（macOS）/ `dist/Markdown Editor.exe`（Windows）に出力される。`--noconfirm` は既存の `build/` / `dist/` を確認なしで上書きする。
 
+* onefile（単一ファイル）でビルドするため、Windowsでは配布物は `.exe` 1つだけになる（付随フォルダなし）
+* onefileは起動時に一時ディレクトリへ内容を展開するぶん、初回起動が数秒遅くなる
 * specファイルは `src/markdown_editor/web/` 一式（`vendor/` の外部ライブラリ含む）を `markdown_editor/web` としてアプリ内に同梱する
 * `frontend/` を変更した場合は、パッケージング前に必ず `npm run build` を実行してバンドルを更新すること
 * ビルド後は `open "dist/Markdown Editor.app"` で起動確認できる
