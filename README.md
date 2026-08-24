@@ -119,11 +119,27 @@ pyinstaller packaging/markdown_editor.spec --noconfirm
 * `frontend/` を変更した場合は、パッケージング前に必ず `npm run build` を実行してバンドルを更新すること
 * ビルド後は `open "dist/Markdown Editor.app"` で起動確認できる
 
+### 同梱物の絞り込み
+
+PyInstallerのQtフックはQtWebEngineの依存を芋づる式に集めるため、そのままでは
+使っていないQtモジュール・QMLモジュール・各国語リソースまで大量に入ってしまう。
+`packaging/bundle_filter.py` で必要なものだけに絞っており、macOSでは実行ファイルが
+**177 MiB → 118 MiB**、展開後が **522 MB / 3,150ファイル → 338 MB / 135ファイル** になる
+（Windowsは圧縮後で約100 MB減の見積り）。判定ルールと根拠は
+[docs/spec.md](docs/spec.md) の13.1を参照。
+
+絞り込みすぎて動かなくなった場合は、`packaging/bundle_filter.py` の `KEEP_*` に名前を足す。
+ルール自体は `.venv/bin/python tests/test_packaging_filter.py` で検証できる。
+
 ## 構成
 
 ```
 frontend/            # esbuildでバンドルするESMソース
                      # (editor.js: CodeMirror 6 / wysiwyg.js: Milkdown)
+packaging/           # 配布物のビルド
+├── markdown_editor.spec  # PyInstaller設定（onefile）
+├── entry.py         # frozen実行時のエントリポイント
+└── bundle_filter.py # 同梱物の絞り込みルール
 src/markdown_editor/
 ├── main.py          # PySide6 アプリシェル（ウィンドウ・メニュー・ファイルI/O・保存管理）
 ├── excel_import.py  # Excel → Markdown 変換（openpyxl。Qt非依存）

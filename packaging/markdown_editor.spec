@@ -2,6 +2,7 @@
 """PyInstaller spec: Markdown Editor の配布用アプリを生成する。
 
 onefile（単一実行ファイル）でビルドする。
+同梱物は packaging/bundle_filter.py で必要なものだけに絞る（spec.md 13.1）。
 
 macOS: dist/Markdown Editor.app
 Windows: dist/Markdown Editor.exe
@@ -38,10 +39,37 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # 使わないPySide6モジュールとPython標準ライブラリを解析対象から外す（spec.md 13.1.2）。
+    # ここに挙げたQtモジュールはC++ライブラリ本体が必要なだけで、Python側からは使わない。
+    excludes=[
+        "PySide6.QtDBus",
+        "PySide6.QtOpenGL",
+        "PySide6.QtPdf",
+        "PySide6.QtPositioning",
+        "PySide6.QtQml",
+        "PySide6.QtQuick",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtSvg",
+        "distutils",
+        "lib2to3",
+        "pydoc_data",
+        "test",
+        "tkinter",
+        "unittest",
+    ],
     noarchive=False,
     cipher=block_cipher,
 )
+
+# 同梱物の絞り込み（spec.md 13.1）。
+# PyInstallerのQtフックはQtWebEngineCoreの依存を芋づる式に集めるため、
+# 使っていないQtモジュール・QMLモジュール・各国語リソースまで入ってしまう。
+# 判定ルールはテストできるよう packaging/bundle_filter.py に切り出してある。
+sys.path.insert(0, str(REPO_ROOT / "packaging"))
+from bundle_filter import filter_entries  # noqa: E402
+
+a.binaries = TOC(filter_entries(a.binaries))
+a.datas = TOC(filter_entries(a.datas))
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
