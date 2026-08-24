@@ -39,6 +39,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 ├── test_file_tree.py           # ファイルツリーのルート決定・クリック・新規作成・トグル
 ├── test_link_click.py          # リンククリックの振り分け（アプリ内 / OS委譲）
 ├── test_split_preview.py       # Editモードの分割プレビュー
+├── test_external_reload.py     # 外部での更新の検知・通知バー・位置を維持した再読み込み
 ├── test_excel_import.py        # Excel → Markdown 変換ロジック（Qt不要）
 └── test_excel_menu.py          # Excel取り込みのメニュー・ダイアログ・出力先の反映
 ```
@@ -47,7 +48,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 
 | レイヤー          | 主なファイル                                           | 責務                                                                                       |
 | ------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| Pythonアプリシェル  | `main.py`                                        | ウィンドウ／メニュー／ファイルI/O／ファイルツリー／エクスポート（PDF/HTML）／貼り付け画像の保存。`QWebChannel`で`bridge`オブジェクトをJSへ公開 |
+| Pythonアプリシェル  | `main.py`                                        | ウィンドウ／メニュー／ファイルI/O／ファイルツリー／外部更新の監視／エクスポート（PDF/HTML）／貼り付け画像の保存。`QWebChannel`で`bridge`オブジェクトをJSへ公開 |
 | Web UI 基盤     | `web/index.html`, `web/app.js`, `web/styles.css` | 3モードのペイン切替、markdown-itによるPreviewレンダリング、右クリックメニュー、Pythonブリッジの受け口                          |
 | Edit モード      | `frontend/editor.js`                             | CodeMirror 6ラッパー（`SourceEditor`）。ブロック挿入APIを提供                                            |
 | WYSIWYG モード   | `frontend/wysiwyg.js`                            | Milkdownラッパー（`WysiwygEditor`）。画像・図・テーブルのNodeView、貼り付けハンドラ                                |
@@ -60,7 +61,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 
 * `AppWebPage(QWebEnginePage)` — JSコンソール出力をstderrへ中継
 
-* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `handleLinkClick` / `log`。Python→JS: `fileOpened` / `pathChanged` / `splitPreviewToggled`（Signal）
+* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `handleLinkClick` / `log`。Python→JS: `fileOpened` / `fileReloaded` / `pathChanged` / `splitPreviewToggled`（Signal）
 
 * `MainWindow(QMainWindow)` — 本体。役割ごとに以下のセクションに分かれる
 
@@ -71,6 +72,8 @@ tests/                          # オフスクリーンQt結合テスト（PySid
   * ファイルツリー（`_build_tree_view` 他、spec.md 9.1）
 
   * ファイル操作（`new_file` / `open_file` / `load_path` / `save` / `save_as` / `_write_to`）
+
+  * 外部更新の検知と再読み込み（`_watch_current_file` / `_check_external_change` / `reload_file` / `manual_reload`、spec.md 9.2）
 
   * クリップボード画像保存（`save_pasted_image`、spec.md 5.2）
 
@@ -113,11 +116,13 @@ Qt非依存の変換ロジック。`main.py` からは実行時に遅延イン�
 
 * `switchMode()` / `setDocument()` — モード切替と文書差し替えの中心ロジック
 
+* `reloadDocument()` — 外部更新の取り込み（spec.md 9.2.3）。`setDocument()` と違い表示位置を先頭へ戻さず、スクロール比率とEditのカーソル位置を引き継ぐ
+
 * `applyLayout()` / `setSplitPreview()` / `renderSplitPreview()` — Editモードの分割プレビュー（spec.md 4.1）。ペインの表示状態・幅比の決定、デバウンス再描画、編集→プレビューのスクロール連動
 
 ### frontend/editor.js
 
-* `SourceEditor` — `getDoc` / `setDoc` / `insertBlock`（右クリックメニューからのブロック挿入）/ スクロール位置保持 / `onScroll`（分割プレビューのスクロール連動用の通知）
+* `SourceEditor` — `getDoc` / `setDoc` / `insertBlock`（右クリックメニューからのブロック挿入）/ スクロール位置保持（`getScrollFraction` / `setScrollFraction`）/ カーソル位置保持（`getCursor` / `setCursor`、spec.md 9.2.3）/ `onScroll`（分割プレビューのスクロール連動用の通知）
 
 ### frontend/wysiwyg.js
 
@@ -294,7 +299,43 @@ flowchart TD
     Fits -->|"いいえ"| Collapse["分割を一時解除しEditのみ表示"]
 ```
 
-### 4.8 Excel → Markdown 変換（spec.md 11章）
+### 4.8 外部での更新の検知と再読み込み（spec.md 9.2）
+
+```mermaid
+flowchart TD
+    Open["load_path() / _write_to()"] --> Watch["_watch_current_file(): ファイル本体と親フォルダを監視"]
+    Watch --> Ext["外部ツールがファイルを書き換え / 削除"]
+    Ext --> Sig["fileChanged または directoryChanged"]
+    Sig --> Debounce["_watch_timer を張り直す（200ms）"]
+    Debounce --> Check["_check_external_change()"]
+
+    Check --> Exists{"ファイルが存在する?"}
+    Exists -->|"いいえ"| Missing["_file_missing = true → dirty扱い（内容は保持）"]
+    Missing --> BarMissing["通知バー: 見つかりません（再読み込みは出さない）"]
+
+    Exists -->|"はい"| Readd["監視が外れていれば addPath で再登録"]
+    Readd --> Read["ディスクの内容を読む"]
+    Read --> Same{"saved_content と一致?"}
+    Same -->|"一致"| Hide["通知バーを閉じる（自分の保存・無変更の更新）"]
+    Same -->|"不一致"| Dirty{"未保存の変更がある?"}
+    Dirty -->|"ない"| Bar1["通知バー: 外部で変更されました ［再読み込み］"]
+    Dirty -->|"ある"| Bar2["通知バー: 編集中の内容は失われます ［破棄して再読み込み］"]
+
+    Bar1 --> Click["ボタン押下"]
+    Bar2 --> Confirm{"確認ダイアログ"}
+    Confirm -->|"キャンセル"| Keep["何もしない（通知は残す）"]
+    Confirm -->|"OK"| Click
+    F5["ファイル > 再読み込み（F5）"] --> Discard{"_confirm_discard()"}
+    Discard -->|"OK"| Click
+
+    Click --> Reload["reload_file(): 改行コードを再検出し内容を差し替え"]
+    Reload --> Emit["bridge.fileReloaded(path, content)"]
+    Emit --> JS["reloadDocument(): スクロール比率とEditのカーソル位置を復元"]
+```
+
+`saved_content` との内容比較で自分の書き込みを除外しているため、「保存」「名前を付けて保存」「Excel変換の出力」では通知が出ない。親フォルダも監視するのは、削除されるとファイルが監視対象から外れ、存在しないパスは登録できないため。
+
+### 4.9 Excel → Markdown 変換（spec.md 11章）
 
 ```mermaid
 flowchart TD

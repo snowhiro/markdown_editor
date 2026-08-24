@@ -19,6 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QEvent,
     QEventLoop,
+    QFileSystemWatcher,
     QModelIndex,
     QObject,
     Qt,
@@ -59,6 +60,9 @@ if getattr(sys, "frozen", False):
     WEB_DIR = Path(sys._MEIPASS) / "markdown_editor" / "web"
 else:
     WEB_DIR = Path(__file__).resolve().parent / "web"
+
+# 外部更新の検知（spec.md 9.2）で、通知を出す前にイベントを合流させる待ち時間(ms)
+WATCH_DEBOUNCE_MS = 200
 
 WELCOME_MARKDOWN = """\
 # Markdown Editor
@@ -123,6 +127,9 @@ class Bridge(QObject):
 
     # 文書の差し替えをJSへ通知する (パス, 内容)。新規作成時はパスは空文字列
     fileOpened = Signal(str, str)
+    # 同じ文書の再読み込みをJSへ通知する (パス, 内容)。
+    # fileOpenedと違い、JS側は表示位置を維持する（spec.md 9.2.3）
+    fileReloaded = Signal(str, str)
     # 保存等でファイルパスが変わったことをJSへ通知する（相対パス画像の解決に使用）
     pathChanged = Signal(str)
     # Editモードの分割プレビューの表示/非表示をJSへ通知する（spec.md 4.1）
@@ -184,6 +191,20 @@ class MainWindow(QMainWindow):
         self.tree_root: Path | None = None
         self._tree_shown_pref = True
 
+        # 外部での更新の検知（spec.md 9.2）
+        # reload_state: None（通知なし） / "changed"（外部で変更） / "missing"（削除・リネーム）
+        self.reload_state: str | None = None
+        # ファイルが消えている間は、内容を失わないよう未保存として扱う（9.2.4）
+        self._file_missing = False
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self._on_watched_change)
+        self.watcher.directoryChanged.connect(self._on_watched_change)
+        # 連続した書き込みを1回にまとめ、書き込み途中の内容を読まないための待ち
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setSingleShot(True)
+        self._watch_timer.setInterval(WATCH_DEBOUNCE_MS)
+        self._watch_timer.timeout.connect(self._check_external_change)
+
         self.view = QWebEngineView(self)
         # JSコンソール出力をターミナルへ中継する（不具合調査用）
         self.view.setPage(AppWebPage(self.view))
@@ -206,6 +227,14 @@ class MainWindow(QMainWindow):
         )
         self.search_bar.setVisible(False)
         layout.addWidget(self.search_bar)
+        # 外部更新の通知バー（spec.md 9.2.2）。検索バーと同じ位置に置くことで
+        # 3モードすべてで同じ見た目・挙動になり、モード切替の影響を受けない
+        self.reload_bar = self._build_reload_bar()
+        self.reload_bar.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.reload_bar.setVisible(False)
+        layout.addWidget(self.reload_bar)
         layout.addWidget(self.view, 1)
 
         self.tree_view = self._build_tree_view()
@@ -248,6 +277,12 @@ class MainWindow(QMainWindow):
         open_folder_action = QAction("フォルダを開く...", self)
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
+
+        # 外部での更新の取り込み（spec.md 9.2.5）
+        self.reload_action = QAction("再読み込み", self)
+        self.reload_action.setShortcut(QKeySequence.StandardKey.Refresh)
+        self.reload_action.triggered.connect(self.manual_reload)
+        file_menu.addAction(self.reload_action)
 
         # Excel → Markdown 変換（spec.md 11章）
         self.import_excel_action = QAction("Excelから変換...", self)
@@ -520,6 +555,168 @@ class MainWindow(QMainWindow):
             return
         self.load_path(target)
 
+    # ---- 外部での更新の検知と再読み込み（spec.md 9.2） ----
+
+    def _build_reload_bar(self) -> QWidget:
+        bar = QWidget(self)
+        bar.setAutoFillBackground(True)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+
+        self.reload_message = QLabel("", bar)
+        layout.addWidget(self.reload_message, 1)
+
+        self.reload_button = QToolButton(bar)
+        self.reload_button.setText("再読み込み")
+        self.reload_button.clicked.connect(self._on_reload_bar_clicked)
+        layout.addWidget(self.reload_button)
+
+        close_btn = QToolButton(bar)
+        close_btn.setText("✕")
+        close_btn.setToolTip("通知を閉じる")
+        close_btn.clicked.connect(self._hide_reload_bar)
+        layout.addWidget(close_btn)
+
+        return bar
+
+    def _hide_reload_bar(self) -> None:
+        self.reload_state = None
+        self.reload_bar.setVisible(False)
+
+    def _show_reload_bar(self, state: str) -> None:
+        self.reload_state = state
+        if state == "missing":
+            self.reload_message.setText(
+                "このファイルが見つかりません（外部で削除・移動された可能性があります）。"
+                "保存すると復活します。"
+            )
+            self.reload_button.setVisible(False)
+        elif self.dirty:
+            self.reload_message.setText(
+                "このファイルは外部で変更されました。"
+                "再読み込みすると編集中の内容は失われます。"
+            )
+            self.reload_button.setText("破棄して再読み込み")
+            self.reload_button.setVisible(True)
+        else:
+            self.reload_message.setText("このファイルは外部で変更されました。")
+            self.reload_button.setText("再読み込み")
+            self.reload_button.setVisible(True)
+        self.reload_bar.setVisible(True)
+
+    def _watch_current_file(self) -> None:
+        """監視対象を現在のファイルへ張り替える。
+
+        ファイル本体だけでなく親フォルダも監視する。削除されるとファイルは
+        監視対象から外れ、存在しないパスは登録できないため、再作成の検知は
+        フォルダ側の通知に頼る必要がある。
+        """
+        for path in self.watcher.files() + self.watcher.directories():
+            self.watcher.removePath(path)
+        if self.current_path is None:
+            return
+        if self.current_path.exists():
+            self.watcher.addPath(str(self.current_path))
+        parent = self.current_path.parent
+        if parent.is_dir():
+            self.watcher.addPath(str(parent))
+
+    def _on_watched_change(self, _path: str) -> None:
+        # 連続する通知をまとめるため、都度タイマーを張り直す
+        self._watch_timer.start()
+
+    def _read_current_file(self) -> tuple[str, str] | None:
+        """現在のファイルを読み、(内容, 改行コード) を返す。読めない場合はNone。"""
+        if self.current_path is None:
+            return None
+        try:
+            with self.current_path.open(encoding="utf-8", newline="") as f:
+                raw = f.read()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return raw.replace("\r\n", "\n"), "\r\n" if "\r\n" in raw else "\n"
+
+    def _check_external_change(self) -> None:
+        """デバウンス後に、ディスク上の状態と比較して通知の要否を決める。"""
+        if self.current_path is None:
+            return
+
+        if not self.current_path.exists():
+            # 内容は保持したまま未保存扱いにする（spec.md 9.2.4）
+            self._file_missing = True
+            self._update_title()
+            self._show_reload_bar("missing")
+            return
+
+        # 削除中に外れた監視を張り直す（再作成された場合を含む）
+        if str(self.current_path) not in self.watcher.files():
+            self.watcher.addPath(str(self.current_path))
+
+        read = self._read_current_file()
+        if read is None:
+            # 一時的に読めない（書き込み中など）場合は次の通知を待つ
+            return
+        content, _newline = read
+
+        if self._file_missing:
+            # 消えていたファイルが戻ってきた
+            self._file_missing = False
+            self._update_title()
+
+        if content == self.saved_content:
+            # アプリ自身の保存や、内容を変えない更新は通知しない（spec.md 9.2.1）
+            self._hide_reload_bar()
+            return
+        self._show_reload_bar("changed")
+
+    def _on_reload_bar_clicked(self) -> None:
+        # 未保存の内容を捨てることになるため、この経路だけ確認を挟む
+        if self.dirty:
+            answer = QMessageBox.warning(
+                self,
+                "再読み込みの確認",
+                "編集中の内容を破棄して、ディスク上の内容を読み込みますか？",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
+        self.reload_file()
+
+    def manual_reload(self) -> None:
+        """ファイルメニュー「再読み込み」（F5）。検知の有無に関わらず読み直す。"""
+        if self.current_path is None:
+            return
+        if not self.current_path.exists():
+            QMessageBox.critical(
+                self, "エラー", f"ファイルが見つかりません:\n{self.current_path}"
+            )
+            return
+        if not self._confirm_discard():
+            return
+        self.reload_file()
+
+    def reload_file(self) -> bool:
+        """ディスク上の内容を、表示位置を維持したまま取り込む（spec.md 9.2.3）。"""
+        read = self._read_current_file()
+        if read is None:
+            QMessageBox.critical(
+                self, "エラー", f"ファイルを読み込めませんでした:\n{self.current_path}"
+            )
+            return False
+        content, newline = read
+        # 外部ツールが改行コードを変えている場合があるため再検出する
+        self.newline = newline
+        self.current_content = content
+        self.saved_content = content
+        self._file_missing = False
+        self._hide_reload_bar()
+        self.bridge.fileReloaded.emit(str(self.current_path), content)
+        self._update_title()
+        self.statusBar().showMessage("ファイルを再読み込みしました", 3000)
+        return True
+
     # ---- Excelの取り込み（spec.md 11章） ----
 
     def import_excel_dialog(self) -> None:
@@ -644,12 +841,16 @@ class MainWindow(QMainWindow):
 
     @property
     def dirty(self) -> bool:
-        return self.current_content != self.saved_content
+        # ファイルが外部で削除された場合も、内容を失わないよう未保存とみなす
+        # （保存すれば復活できる。spec.md 9.2.4）
+        return self._file_missing or self.current_content != self.saved_content
 
     def _update_title(self) -> None:
         name = self.current_path.name if self.current_path else "無題"
         mark = "*" if self.dirty else ""
         self.setWindowTitle(f"{mark}{name} - Markdown Editor")
+        # 再読み込みは保存済みファイルにしか意味がない（spec.md 9.2.5）
+        self.reload_action.setEnabled(self.current_path is not None)
 
     def on_content_changed(self, content: str) -> None:
         self.current_content = content
@@ -691,6 +892,9 @@ class MainWindow(QMainWindow):
         self.current_content = ""
         self.saved_content = ""
         self.newline = "\n"
+        self._file_missing = False
+        self._hide_reload_bar()
+        self._watch_current_file()
         self.tree_view.setCurrentIndex(QModelIndex())
         self.bridge.fileOpened.emit("", "")
         self._update_title()
@@ -727,6 +931,10 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self.current_content = content
         self.saved_content = content
+        # 前のファイルの通知が残らないようにしてから監視を張り替える（spec.md 9.2）
+        self._file_missing = False
+        self._hide_reload_bar()
+        self._watch_current_file()
         self._maybe_update_tree_root(path)
         self.bridge.fileOpened.emit(str(path), content)
         self._update_title()
@@ -765,6 +973,11 @@ class MainWindow(QMainWindow):
         path_changed = self.current_path != path
         self.current_path = path
         self.saved_content = self.current_content
+        # 保存でディスクとの差が解消されるため通知を閉じる（spec.md 9.2.1）。
+        # 監視も張り替える（別名保存でパスが変わる／削除後の復活に対応する）
+        self._file_missing = False
+        self._hide_reload_bar()
+        self._watch_current_file()
         self._update_title()
         if path_changed:
             self._maybe_update_tree_root(path)

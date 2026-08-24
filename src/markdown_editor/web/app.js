@@ -7,6 +7,7 @@
  *   JS→Python: bridge.ready()            初期化完了通知（Pythonはこれを受けて初期文書を送る）
  *              bridge.contentChanged(md) 編集内容の同期（保存・未保存管理用）
  *   Python→JS: bridge.fileOpened(path, content) 文書の差し替え（新規作成時は path="")
+ *              bridge.fileReloaded(path, content) 同じ文書の再読み込み（表示位置を維持）
  *              bridge.splitPreviewToggled(on)   Editモードの分割プレビュー切替
  */
 
@@ -778,6 +779,50 @@ function setDocument(path, content) {
   }
 }
 
+// ---- 同じ文書の再読み込み（外部更新の取り込み: spec.md 9.2） ----
+
+// setDocumentとの違いは表示位置を先頭へ戻さないこと。外部ツールが書き換えた
+// 内容を、いま見ている位置のまま差し替えるために別経路にしている。
+function reloadDocument(path, content) {
+  // 差し替え前に位置を控える（差し替えると高さが変わるため比率で保持する）
+  const previewFraction = getScrollFraction(previewPane);
+  const wysiwygFraction = getScrollFraction(wysiwygPane);
+  const editorFraction = editor ? editor.getScrollFraction() : 0;
+  const cursor = editor ? editor.getCursor() : 0;
+  // 分割プレビューの追従状態も引き継ぐ（renderSplitPreviewが参照する）
+  const follows = previewFollowsEditor;
+
+  state.filePath = path || null;
+  state.markdown = content;
+  filePathEl.textContent = path || "";
+
+  if (editor) {
+    applyingExternal = true;
+    editor.setDoc(content);
+    // setDocは全文置換のためカーソルが末尾へ寄る。明示的に戻す
+    editor.setCursor(cursor);
+    applyingExternal = false;
+  }
+  if (wysiwyg) {
+    wysiwygDoc = content;
+    wysiwyg.setMarkdown(content);
+  }
+
+  if (state.mode === "preview") {
+    // Mermaid描画で高さが変わるため、描画完了後にもう一度合わせる
+    setScrollFraction(previewPane, previewFraction);
+    render().then(() => setScrollFraction(previewPane, previewFraction));
+  } else if (state.mode === "edit" && editor) {
+    editor.setScrollFraction(editorFraction);
+    if (splitActive) {
+      previewFollowsEditor = follows;
+      renderSplitPreview(); // 位置の復元はrenderSplitPreview側が行う
+    }
+  } else if (state.mode === "wysiwyg") {
+    setScrollFraction(wysiwygPane, wysiwygFraction);
+  }
+}
+
 // ---- 起動時のウェルカム表示（ブラウザ単体で開いた開発時用） ----
 
 const SAMPLE_MARKDOWN = `# Markdown Editor
@@ -821,6 +866,8 @@ if (typeof qt !== "undefined" && qt.webChannelTransport) {
   new QWebChannel(qt.webChannelTransport, (channel) => {
     bridge = channel.objects.bridge;
     bridge.fileOpened.connect((path, content) => setDocument(path, content));
+    // 外部更新の再読み込み（spec.md 9.2）。表示位置を維持するため経路を分ける
+    bridge.fileReloaded.connect((path, content) => reloadDocument(path, content));
     // 保存等でパスが変わったら相対パス画像の解決基準を更新する
     // 表示メニューからの分割プレビュー切替（spec.md 4.1）
     bridge.splitPreviewToggled.connect((on) => setSplitPreview(on));

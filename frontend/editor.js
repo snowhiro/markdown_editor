@@ -120,6 +120,18 @@ class SourceEditor {
     view.focus();
   }
 
+  // カーソル位置（文書先頭からの文字オフセット）。外部更新の再読み込み
+  // （spec.md 9.2.3）で位置を引き継ぐために使う
+  getCursor() {
+    return this.view.state.selection.main.head;
+  }
+
+  setCursor(pos) {
+    // 再読み込み後の文書は短くなっている可能性があるためクランプする
+    const clamped = Math.max(0, Math.min(pos, this.view.state.doc.length));
+    this.view.dispatch({ selection: { anchor: clamped } });
+  }
+
   getScrollFraction() {
     const el = this.view.scrollDOM;
     const max = el.scrollHeight - el.clientHeight;
