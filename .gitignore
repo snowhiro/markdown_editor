@@ -6,3 +6,4 @@ __pycache__/
 build/
 dest/
 .DS_Store
+markdown-editor-settings.json

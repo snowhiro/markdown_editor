@@ -17,6 +17,7 @@ src/markdown_editor/
 ├── main.py                     # PySide6 アプリシェル（ウィンドウ・メニュー・
                                  #   ファイルI/O・ファイルツリー・エクスポート・貼り付け画像保存）
 ├── excel_import.py             # Excel → Markdown 変換（openpyxl / Qt非依存）
+├── settings.py                 # 設定の永続化（JSONファイル / Qt非依存）
 └── web/                        # QWebEngineView 内で動作するUI本体
     ├── index.html              # ペイン構造・スクリプト読み込み順を定義
     ├── app.js                  # Markdownレンダリング・モード管理・右クリックメニュー・
@@ -40,6 +41,8 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 ├── test_link_click.py          # リンククリックの振り分け（アプリ内 / OS委譲）
 ├── test_split_preview.py       # Editモードの分割プレビュー
 ├── test_external_reload.py     # 外部での更新の検知・通知バー・位置を維持した再読み込み
+├── test_settings.py            # 設定ファイルの置き場所・破損復帰・原子的書き込み（Qt不要）
+├── test_content_width.py       # 本文の表示幅の切替・適用範囲・永続化
 ├── test_excel_import.py        # Excel → Markdown 変換ロジック（Qt不要）
 └── test_excel_menu.py          # Excel取り込みのメニュー・ダイアログ・出力先の反映
 ```
@@ -54,6 +57,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 | WYSIWYG モード   | `frontend/wysiwyg.js`                            | Milkdownラッパー（`WysiwygEditor`）。画像・図・テーブルのNodeView、貼り付けハンドラ                                |
 | Mermaid GUI編集 | `frontend/diagram-editor.js`                     | フローチャート/シーケンス図の専用編集ダイアログ（`DiagramEditorDialog` / `SequenceEditorDialog`）                 |
 | Excel取り込み     | `excel_import.py`                                | openpyxl／zipによるExcelの読み取りとMarkdown生成。QtもUIも参照しないため単体でテスト可能                              |
+| 設定の永続化      | `settings.py`                                    | 実行ファイルの隣のJSONファイルの読み書き。Qtに依存しない                                                     |
 
 ## 3. 主要な型・クラス
 
@@ -61,7 +65,7 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 
 * `AppWebPage(QWebEnginePage)` — JSコンソール出力をstderrへ中継
 
-* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `handleLinkClick` / `log`。Python→JS: `fileOpened` / `fileReloaded` / `pathChanged` / `splitPreviewToggled`（Signal）
+* `Bridge(QObject)` — JS→Python: `ready` / `contentChanged` / `modeChanged` / `exportBody` / `savePastedImage` / `handleLinkClick` / `log`。Python→JS: `fileOpened` / `fileReloaded` / `pathChanged` / `splitPreviewToggled` / `contentWidthChanged`（Signal）
 
 * `MainWindow(QMainWindow)` — 本体。役割ごとに以下のセクションに分かれる
 
@@ -75,11 +79,25 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 
   * 外部更新の検知と再読み込み（`_watch_current_file` / `_check_external_change` / `reload_file` / `manual_reload`、spec.md 9.2）
 
+  * 本文の表示幅（`set_content_width`、spec.md 4.2）
+
   * クリップボード画像保存（`save_pasted_image`、spec.md 5.2）
 
   * エクスポート（`export_html_dialog` / `export_pdf_dialog` / `_print_pdf`、spec.md 7章）
 
   * Excel取り込み（`import_excel_dialog` / `import_excel` / `_report_excel_result`、spec.md 11章）
+
+### settings.py
+
+設定の永続化（spec.md 12章）。Qtに依存せず、実行ファイルの隣のJSONファイル1つで完結する。
+
+* `settings_dir()` — 設定ファイルの置き場所。frozen時は実行ファイルの隣だが、macOSの `.app` では
+  `Contents/MacOS/` ではなく **`.app` を含むフォルダ** を返す（`.app` 内部に書くと署名が壊れ、
+  アプリの入れ替えで設定が消えるため）。`sys._MEIPASS` は終了時に消えるので使わない
+
+* `Settings` — `get_str()` / `set()` / `save()`。壊れたJSON・型違い・許可外の値はすべて既定値へ倒す。
+  書き込みは一時ファイル＋`os.replace` の原子的置換。失敗しても例外を投げず `False` を返す
+  （呼び出し側が通知だけ行い、起動は継続する）
 
 ### excel_import.py
 
@@ -98,7 +116,7 @@ Qt非依存の変換ロジック。`main.py` からは実行時に遅延イン�
 * `sanitize_sheet_name(name)` / `unique_file_names(names)` — ファイル名の正規化と重複回避（spec.md 11.2）
 
 * `scan_drawing_objects(xlsx_path)` — 描画オブジェクトの検出。openpyxlは未対応図形を含む描画パートを
-  画像・グラフごと読み捨てるため（spec.md 13.1）、xlsxのzipを直接読んで数える
+  画像・グラフごと読み捨てるため（spec.md 14.1）、xlsxのzipを直接読んで数える
 
 ### web/app.js
 
@@ -119,6 +137,8 @@ Qt非依存の変換ロジック。`main.py` からは実行時に遅延イン�
 * `reloadDocument()` — 外部更新の取り込み（spec.md 9.2.3）。`setDocument()` と違い表示位置を先頭へ戻さず、スクロール比率とEditのカーソル位置を引き継ぐ
 
 * `applyLayout()` / `setSplitPreview()` / `renderSplitPreview()` — Editモードの分割プレビュー（spec.md 4.1）。ペインの表示状態・幅比の決定、デバウンス再描画、編集→プレビューのスクロール連動
+
+* `setContentWidth()` — 本文の表示幅（spec.md 4.2）。`body` の `width-standard` / `width-wide` / `width-full` クラスを差し替えるだけで、Preview・WYSIWYG・分割プレビューの右ペインの3か所（いずれも `.markdown-body`）がまとめて切り替わる
 
 ### frontend/editor.js
 
@@ -299,7 +319,36 @@ flowchart TD
     Fits -->|"いいえ"| Collapse["分割を一時解除しEditのみ表示"]
 ```
 
-### 4.8 外部での更新の検知と再読み込み（spec.md 9.2）
+### 4.8 本文の表示幅と設定の永続化（spec.md 4.2 / 12章）
+
+```mermaid
+flowchart TD
+    Boot["起動"] --> Load["Settings(): 実行ファイルの隣のJSONを読む"]
+    Load --> Valid{"値が standard/wide/full ?"}
+    Valid -->|"いいえ・ファイル無し・破損"| Default["standard を採用"]
+    Valid -->|"はい"| Use["その値を採用"]
+    Default --> Menu
+    Use --> Menu["表示 > 本文の幅 の該当項目にチェック"]
+    Menu --> Ready["JS初期化完了(ready)"]
+    Ready --> Emit["bridge.contentWidthChanged(name) を文書より先に送る"]
+    Emit --> Class["setContentWidth(): body のクラスを width-* に差し替え"]
+    Class --> Apply["Preview / WYSIWYG / 分割プレビューの右ペインが一括で切り替わる"]
+
+    Pick["ユーザーがメニューで選択"] --> Set["set_content_width()"]
+    Set --> Emit
+    Set --> Save["Settings.set(): 一時ファイル + os.replace で原子的に保存"]
+    Save --> Ok{"保存できた?"}
+    Ok -->|"できた"| Done["次回起動時も復元される"]
+    Ok -->|"読み取り専用等で失敗"| Warn["ステータスバーに一度だけ通知。以降はメモリ上のみ"]
+
+    Export["エクスポート"] --> Kind{"HTML か PDF か"}
+    Kind -->|"HTML"| WHtml["現在の幅を body クラスに反映"]
+    Kind -->|"PDF"| WPdf["用紙幅が固定のため常に width-standard"]
+```
+
+書き込みに失敗しても他の場所へフォールバックしないのは、「マシンに痕跡を残さない」という置き場所の方針（spec.md 12.1）に反するため。
+
+### 4.9 外部での更新の検知と再読み込み（spec.md 9.2）
 
 ```mermaid
 flowchart TD
@@ -335,7 +384,7 @@ flowchart TD
 
 `saved_content` との内容比較で自分の書き込みを除外しているため、「保存」「名前を付けて保存」「Excel変換の出力」では通知が出ない。親フォルダも監視するのは、削除されるとファイルが監視対象から外れ、存在しないパスは登録できないため。
 
-### 4.9 Excel → Markdown 変換（spec.md 11章）
+### 4.10 Excel → Markdown 変換（spec.md 11章）
 
 ```mermaid
 flowchart TD

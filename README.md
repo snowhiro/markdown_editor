@@ -47,6 +47,19 @@ markdown-editor path/to/file.md    # 起動時に指定したMarkdownファイ�
 （Cmd/Ctrl+Shift+S）から行う。未保存の変更があるとタイトルバーに `*` が表示され、
 別のファイルを開く・アプリを終了する際に保存確認ダイアログが出る。
 
+### 本文の表示幅を変える
+
+「表示 > 本文の幅」で **標準（860px）/ 広め（1100px）/ 画面いっぱい** の3段階を選べる。
+Preview・WYSIWYG・分割プレビューの右ペインにまとめて適用される（Editモードのソース表示は対象外）。
+日本語で1行あたり おおよそ 48字 / 63字 / 画面幅次第 になる。
+
+選んだ値は `markdown-editor-settings.json` に保存され、次回起動時に復元される。
+このファイルは**実行ファイルと同じ場所**に置かれるため（macOSは `.app` を含むフォルダ、
+Windowsは `.exe` と同じフォルダ）、レジストリやOSの設定領域は一切使わない。
+アプリごと削除すれば設定も消え、USBメモリ等に入れて持ち運べる。
+アプリを書き込み不可の場所（`Program Files` 直下など）に置いた場合は保存できず、
+その起動中のみ設定が有効になる。
+
 ### 裏でファイルが更新されたとき
 
 開いているファイルが他のエディタやスクリプトで書き換えられると、上部に
@@ -114,6 +127,7 @@ frontend/            # esbuildでバンドルするESMソース
 src/markdown_editor/
 ├── main.py          # PySide6 アプリシェル（ウィンドウ・メニュー・ファイルI/O・保存管理）
 ├── excel_import.py  # Excel → Markdown 変換（openpyxl。Qt非依存）
+├── settings.py      # 設定の永続化（実行ファイルの隣のJSON。Qt非依存）
 └── web/             # QWebEngineView 内で動作するUI本体
     ├── index.html
     ├── app.js       # Markdownレンダリング・モード管理・Pythonブリッジ

@@ -619,6 +619,7 @@ body.split-dragging * {
 
 /* ---- GitHub風 Markdownスタイル ---- */
 
+/* 既定は標準幅。body のクラスで3段階に切り替える（spec.md 4.2） */
 .markdown-body {
   max-width: 860px;
   margin: 0 auto;
@@ -730,12 +731,23 @@ body.split-dragging * {
   margin: 24px 0;
 }
 
+/* ---- 本文の表示幅（spec.md 4.2） ---- */
+
+body.width-standard .markdown-body { max-width: 860px; }
+body.width-wide .markdown-body { max-width: 1100px; }
+body.width-full .markdown-body { max-width: none; }
+
 /* ---- Mermaid ---- */
 
 .markdown-body pre.mermaid {
   background: transparent;
   display: flex;
   justify-content: center;
+}
+
+/* 本文が幅いっぱいのときは左端から始まるため、図も左寄せにして視線を揃える */
+body.width-full .markdown-body pre.mermaid {
+  justify-content: flex-start;
 }
 
 .mermaid-error {

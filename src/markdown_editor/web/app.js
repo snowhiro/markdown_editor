@@ -9,6 +9,7 @@
  *   Python→JS: bridge.fileOpened(path, content) 文書の差し替え（新規作成時は path="")
  *              bridge.fileReloaded(path, content) 同じ文書の再読み込み（表示位置を維持）
  *              bridge.splitPreviewToggled(on)   Editモードの分割プレビュー切替
+ *              bridge.contentWidthChanged(name) 本文の表示幅の切替
  */
 
 "use strict";
@@ -340,6 +341,23 @@ function getScrollFraction(el) {
 function setScrollFraction(el, fraction) {
   el.scrollTop = fraction * (el.scrollHeight - el.clientHeight);
 }
+
+// ---- 本文の表示幅（spec.md 4.2） ----
+
+// Preview・WYSIWYG・分割プレビューの右ペインはいずれも .markdown-body を使うため、
+// body側のクラスを差し替えるだけで3か所まとめて切り替わる。
+const CONTENT_WIDTHS = ["standard", "wide", "full"];
+
+function setContentWidth(name) {
+  const value = CONTENT_WIDTHS.includes(name) ? name : "standard";
+  for (const w of CONTENT_WIDTHS) {
+    document.body.classList.toggle(`width-${w}`, w === value);
+  }
+}
+window.setContentWidth = setContentWidth;
+
+// Python側から通知が来るまでは既定（標準）で表示する
+setContentWidth("standard");
 
 // ---- 分割プレビュー（spec.md 4.1） ----
 
@@ -866,6 +884,8 @@ if (typeof qt !== "undefined" && qt.webChannelTransport) {
   new QWebChannel(qt.webChannelTransport, (channel) => {
     bridge = channel.objects.bridge;
     bridge.fileOpened.connect((path, content) => setDocument(path, content));
+    // 本文の表示幅（spec.md 4.2）
+    bridge.contentWidthChanged.connect((name) => setContentWidth(name));
     // 外部更新の再読み込み（spec.md 9.2）。表示位置を維持するため経路を分ける
     bridge.fileReloaded.connect((path, content) => reloadDocument(path, content));
     // 保存等でパスが変わったら相対パス画像の解決基準を更新する

@@ -28,7 +28,14 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QImage, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QDesktopServices,
+    QImage,
+    QKeySequence,
+)
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -51,6 +58,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# PyInstallerはこのファイルをスクリプト（__main__）として実行するため、
+# 相対インポートは使えない。パッケージ名から絶対インポートする。
+from markdown_editor.settings import Settings
+
 if getattr(sys, "frozen", False):
     # PyInstallerでパッケージ化した場合、エントリポイントスクリプト（main.py）の
     # __file__ はパッケージ階層を保持せずバンドル直下に置かれるため、
@@ -63,6 +74,14 @@ else:
 
 # 外部更新の検知（spec.md 9.2）で、通知を出す前にイベントを合流させる待ち時間(ms)
 WATCH_DEBOUNCE_MS = 200
+
+# 本文の表示幅（spec.md 4.2）。値はJS側のbodyクラス（width-*）と設定ファイルの
+# view.contentWidth に共通で使う
+CONTENT_WIDTHS = ("standard", "wide", "full")
+CONTENT_WIDTH_LABELS = (("standard", "標準"), ("wide", "広め"), ("full", "画面いっぱい"))
+DEFAULT_CONTENT_WIDTH = "standard"
+# エクスポート時の本文幅（spec.md 4.2.5）。PDFは用紙幅が固定のため常に標準とする
+PDF_CONTENT_WIDTH = "standard"
 
 WELCOME_MARKDOWN = """\
 # Markdown Editor
@@ -134,6 +153,8 @@ class Bridge(QObject):
     pathChanged = Signal(str)
     # Editモードの分割プレビューの表示/非表示をJSへ通知する（spec.md 4.1）
     splitPreviewToggled = Signal(bool)
+    # 本文の表示幅（standard / wide / full）をJSへ通知する（spec.md 4.2）
+    contentWidthChanged = Signal(str)
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
@@ -190,6 +211,14 @@ class MainWindow(QMainWindow):
         # ファイルツリー（spec.md 9.1）
         self.tree_root: Path | None = None
         self._tree_shown_pref = True
+
+        # 設定の永続化（spec.md 12章）。メニューの初期チェック状態に必要なため
+        # ウィジェットの構築より先に読み込む
+        self.settings = Settings()
+        self._settings_warned = False
+        self.content_width = self.settings.get_str(
+            "view", "contentWidth", DEFAULT_CONTENT_WIDTH, allowed=CONTENT_WIDTHS
+        )
 
         # 外部での更新の検知（spec.md 9.2）
         # reload_state: None（通知なし） / "changed"（外部で変更） / "missing"（削除・リネーム）
@@ -336,6 +365,51 @@ class MainWindow(QMainWindow):
         self.split_preview_action.setEnabled(False)  # Editモードでのみ有効
         self.split_preview_action.triggered.connect(self.bridge.splitPreviewToggled)
         view_menu.addAction(self.split_preview_action)
+
+        view_menu.addSeparator()
+
+        # 本文の表示幅（spec.md 4.2）。3段階の排他選択とする
+        width_menu = view_menu.addMenu("本文の幅")
+        self.content_width_group = QActionGroup(self)
+        self.content_width_group.setExclusive(True)
+        self.content_width_actions: dict[str, QAction] = {}
+        for name, label in CONTENT_WIDTH_LABELS:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(name == self.content_width)
+            action.triggered.connect(
+                lambda _checked=False, n=name: self.set_content_width(n)
+            )
+            self.content_width_group.addAction(action)
+            width_menu.addAction(action)
+            self.content_width_actions[name] = action
+
+    # ---- 本文の表示幅（spec.md 4.2） ----
+
+    def set_content_width(self, name: str) -> None:
+        """本文幅を切り替え、設定ファイルへ保存する。"""
+        if name not in CONTENT_WIDTHS:
+            return
+        self.content_width = name
+        action = self.content_width_actions.get(name)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)  # メニュー以外から呼ばれた場合に表示を合わせる
+        self.bridge.contentWidthChanged.emit(name)
+        if not self.settings.set("view", "contentWidth", name):
+            self._notify_settings_save_failed()
+
+    def _notify_settings_save_failed(self) -> None:
+        """設定を保存できないことを一度だけ知らせる（spec.md 12.4）。
+
+        読み取り専用の場所にアプリを置いた場合に起きる。痕跡を残さない方針のため
+        別の場所へフォールバックはせず、この起動中はメモリ上でのみ設定を保持する。
+        """
+        if self._settings_warned:
+            return
+        self._settings_warned = True
+        self.statusBar().showMessage(
+            "設定を保存できませんでした（この起動中のみ有効）", 8000
+        )
 
     # ---- 検索（Previewモード） ----
 
@@ -736,7 +810,7 @@ class MainWindow(QMainWindow):
         """Excelをシート単位のMarkdownへ変換し、出力先を開く（spec.md 11章）。"""
         # openpyxlは起動時には不要なため、ここで初めて読み込む
         try:
-            from . import excel_import
+            from markdown_editor import excel_import
         except ImportError as e:
             QMessageBox.critical(
                 self, "エラー", f"Excelの読み込みに必要なライブラリがありません:\n{e}"
@@ -857,7 +931,9 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def on_web_ready(self) -> None:
-        """JS側の初期化完了後に初期文書を送る。"""
+        """JS側の初期化完了後に、表示設定と初期文書を送る。"""
+        # 文書より先に幅を適用し、既定幅で描画してから切り替わるのを避ける
+        self.bridge.contentWidthChanged.emit(self.content_width)
         if self.initial_path is not None:
             self.load_path(self.initial_path)
             self.initial_path = None
@@ -1111,7 +1187,10 @@ class MainWindow(QMainWindow):
                 f"レンダリングに失敗しました:\n{body[len(self._EXPORT_ERROR_PREFIX):]}",
             )
             return
-        html = self._build_export_html(body)
+        # HTMLは画面で見るものなので現在の幅設定を反映し、
+        # PDFは用紙幅が固定のため常に標準幅とする（spec.md 4.2.5）
+        width = self.content_width if kind == "html" else PDF_CONTENT_WIDTH
+        html = self._build_export_html(body, width)
         if kind == "html":
             try:
                 path.write_text(html, encoding="utf-8")
@@ -1122,8 +1201,11 @@ class MainWindow(QMainWindow):
         else:
             self._print_pdf(html, path)
 
-    def _build_export_html(self, body: str) -> str:
-        """本文HTMLをCSS埋め込みの自己完結な単一HTMLに組み立てる。"""
+    def _build_export_html(self, body: str, width: str = DEFAULT_CONTENT_WIDTH) -> str:
+        """本文HTMLをCSS埋め込みの自己完結な単一HTMLに組み立てる。
+
+        本文幅は body の width-* クラスで決める（styles.cssの規則をそのまま使う）。
+        """
         styles = (WEB_DIR / "styles.css").read_text(encoding="utf-8")
         hl_light = (WEB_DIR / "vendor" / "highlight-github.min.css").read_text(
             encoding="utf-8"
@@ -1144,12 +1226,13 @@ class MainWindow(QMainWindow):
 <style media="(prefers-color-scheme: light)">{hl_light}</style>
 <style media="(prefers-color-scheme: dark)">{hl_dark}</style>
 <style>
-/* エクスポート用: アプリのペインレイアウトに依存しない単体表示 */
+/* エクスポート用: アプリのペインレイアウトに依存しない単体表示。
+   max-widthは body の width-* クラス（styles.css）に任せる */
 body {{ margin: 0; }}
-.markdown-body {{ max-width: 860px; margin: 0 auto; padding: 32px 24px; }}
+.markdown-body {{ margin: 0 auto; padding: 32px 24px; }}
 </style>
 </head>
-<body>
+<body class="width-{width}">
 <article class="markdown-body">
 {body}
 </article>
