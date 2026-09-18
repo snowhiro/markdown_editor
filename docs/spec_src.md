@@ -31,6 +31,12 @@ src/markdown_editor/
         ├── highlight.min.js / highlight-github(-dark).min.css
         └── mermaid.min.js
 
+packaging/                      # 配布物のビルド（PyInstaller）
+├── markdown_editor.spec        # onefileビルド設定
+├── entry.py                    # frozen実行時のエントリポイント
+                                 #   （main.pyを直接指定すると相対importが壊れるため）
+└── bundle_filter.py            # 同梱物の絞り込みルール（spec.md 13.1 / Qt非依存）
+
 tests/                          # オフスクリーンQt結合テスト（PySide6 + QT_QPA_PLATFORM=offscreen）
 ├── test_save_logic.py          # 新規/開く/保存/未保存確認・改行コード維持
 ├── test_search.py              # Previewモードの検索（インクリメンタル・前後移動・モード連動）
@@ -44,7 +50,8 @@ tests/                          # オフスクリーンQt結合テスト（PySid
 ├── test_settings.py            # 設定ファイルの置き場所・破損復帰・原子的書き込み（Qt不要）
 ├── test_content_width.py       # 本文の表示幅の切替・適用範囲・永続化
 ├── test_excel_import.py        # Excel → Markdown 変換ロジック（Qt不要）
-└── test_excel_menu.py          # Excel取り込みのメニュー・ダイアログ・出力先の反映
+├── test_excel_menu.py          # Excel取り込みのメニュー・ダイアログ・出力先の反映
+└── test_packaging_filter.py    # 配布物の絞り込みルール（Qt不要）
 ```
 
 ## 2. レイヤーと責務
@@ -424,3 +431,5 @@ flowchart TD
 * フロントエンドのビルド: `npm run build`（`esbuild frontend/editor.js frontend/wysiwyg.js` → `web/vendor/*-bundle.js`）。`frontend/`配下を変更したら再実行が必要
 
 * テスト: `QT_QPA_PLATFORM=offscreen .venv/bin/python tests/<name>.py`（PySide6のオフスクリーン実行、GUIを起動せずCIでも実行可能）
+
+* 配布物のビルド: `pyinstaller packaging/markdown_editor.spec --noconfirm`（リポジトリ直下で実行する。specが `Path.cwd()` を起点にパスを解決するため）。`Analysis` の後で `bundle_filter.keep()` により `a.binaries` / `a.datas` をふるいにかけ、使わないQtモジュール・QMLモジュール・各国語リソースを落とす（spec.md 13.1）
